@@ -38,6 +38,11 @@
 - Actions taken: 参考 NautilusTrader Architecture 与 Adapters 文档，撰写 timing/ARCHITECTURE.md，包含（1）整体架构图与分层（2）引擎层总览（3）行情接入层详细设计：DataClient 端口、DataEngine、数据类型、Cache、数据流、目录与接口清单、检查项 §3.6。更新 task_plan（Phase 2b、架构引用）、findings（Nautilus DataClient 调研、ARCHITECTURE.md 链接）。
 - Files created/modified: timing/ARCHITECTURE.md（新建）、timing/task_plan.md、timing/findings.md、timing/progress.md
 
+### Bollydog 框架深度分析
+- **Status:** complete
+- Actions taken: 深度分析 bollydog 框架设计范式，输出交易系统适配方案（案例一）；新增 AI Multi-Agent 系统适配分析（案例二），涵盖主流 Agent 架构范式（Supervisor-Worker / Pipeline / Router / Handoff / ReAct / MCP / Shared Memory）与 bollydog 原语映射，识别 8 项新增缺失能力（Thread、Handoff、Middleware、Parallel、Agent Card、Tool+MCP、分层 Memory、DAG）；汇总两个案例的增强项为统一路线图（P0 ~ P2）。
+- Files created/modified: timing/ANALYSIS_BOLLYDOG_FIT.md（大幅扩展：六～十一章，从 161 行扩展到 ~360 行）、timing/progress.md
+
 ### Phase 4–5 其余
 - **Status:** pending
 - （按 ARCHITECTURE.md §3.6 实现行情接入层；单元测试与 bollydog 接入、README 待后续）
