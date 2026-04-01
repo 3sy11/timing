@@ -1,7 +1,13 @@
 [project]
 name = "timing"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "交易系统首期：斐波那契回撤 + 触线，基于 bollydog"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pydantic>=2",
+    "bollydog",
+    "pyarrow>=14",
+]
+
+[tool.uv.sources]
+bollydog = { path = "../bollydog", editable = true }

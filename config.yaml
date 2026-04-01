@@ -1,0 +1,12 @@
+# 与仓库根目录 config.yaml 相同；CLI 请从仓库根执行：
+#   cd <repo_root> && PYTHONPATH=. bollydog execute --config config.yaml ...
+# HTTP：BOLLYDOG_HTTP_ENABLED=1 时注册 PushBars 等 router_mapping
+cache:
+  app: !module timing.engine.cache.CacheEngine
+  commands: [commands]
+data:
+  app: !module timing.data.engine.DataEngine
+  commands: [models]
+analysis:
+  app: !module timing.analysis.engine.AnalysisEngine
+  commands: [models]

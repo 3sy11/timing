@@ -18,10 +18,11 @@ from bollydog.bootstrap import Bootstrap
 from bollydog.globals import _hub_ctx_stack, _protocol_ctx_stack
 from bollydog.models.service import AppService
 from bollydog.models.base import BaseCommand
-from bollydog.service.config import BOLLYDOG_HTTP_ENABLED, BOLLYDOG_WS_ENABLED
+from bollydog.service.config import BOLLYDOG_HTTP_ENABLED, BOLLYDOG_WS_ENABLED, BOLLYDOG_UDS_ENABLED
 from bollydog.service.app import Hub
 from bollydog.entrypoint.http.app import HttpService
 from bollydog.entrypoint.websocket.app import SocketService
+from bollydog.entrypoint.uds.config import SEND_DEFAULT_CONFIG
 
 
 def _load_config(config: str) -> Dict:
@@ -41,6 +42,10 @@ def get_apps(config: str = None) -> Dict[str, AppService]:
     if config:
         work_dir = pathlib.Path(config).parent
         sys.path.insert(0, work_dir.as_posix())
+        try:
+            smart_import('commands')
+        except (ImportError, ModuleNotFoundError):
+            logging.info('no `commands` module found, skipping')
         for domain, app_config in (_load_config(config) or {}).items():
             if domain in apps:
                 raise ValueError(f'duplicate domain: {domain}')
@@ -50,6 +55,9 @@ def get_apps(config: str = None) -> Dict[str, AppService]:
         apps['http'] = HttpService.create_from()
     if BOLLYDOG_WS_ENABLED:
         apps['ws'] = SocketService.create_from()
+    if BOLLYDOG_UDS_ENABLED:
+        from bollydog.entrypoint.uds.app import UdsService
+        apps['uds'] = UdsService.create_from()
     return apps
 
 
@@ -74,20 +82,20 @@ class CLI:
         rows = []
         for fqn, cmd_cls in BaseCommand._registry.items():
             name = cmd_cls.alias if len(alias_count[cmd_cls.alias]) == 1 else fqn
-            dest = cmd_cls.destination or '-'
+            topic = cmd_cls.destination or '-'
             user_fields = {k: v for k, v in cmd_cls.model_fields.items() if k not in _base_fields}
             params = ', '.join(f'{k}: {v.annotation.__name__}' for k, v in user_fields.items()) if user_fields else '-'
-            rows.append((name, dest, params))
+            rows.append((name, topic, params))
         if not rows:
             print('No commands registered.')
             return
         w0 = max(len(r[0]) for r in rows)
         w1 = max(len(r[1]) for r in rows)
-        header = f'{"COMMAND":<{w0}}  {"DESTINATION":<{w1}}  PARAMS'
+        header = f'{"COMMAND":<{w0}}  {"TOPIC":<{w1}}  PARAMS'
         print(header)
         print('-' * len(header))
-        for name, dest, params in rows:
-            print(f'{name:<{w0}}  {dest:<{w1}}  {params}')
+        for name, topic, params in rows:
+            print(f'{name:<{w0}}  {topic:<{w1}}  {params}')
 
     @staticmethod
     def execute(command: str, **kwargs):
@@ -104,6 +112,17 @@ class CLI:
 
         asyncio.run(_run())
         logging.info(json.dumps(msg.model_dump(), ensure_ascii=False))
+
+    @staticmethod
+    def send(command: str, socket: str, **kwargs):
+        config = kwargs.pop('config', SEND_DEFAULT_CONFIG)
+        get_apps(config)
+        cmd_cls = BaseCommand.resolve(command)
+        cmd_cls(**kwargs)
+        from bollydog.entrypoint.uds.app import UdsService
+        uds = UdsService(sock_path=socket)
+        resp = asyncio.run(uds.send(command, kwargs))
+        logging.info(json.dumps(resp, ensure_ascii=False))
 
     @staticmethod
     def shell(config: str = None):
