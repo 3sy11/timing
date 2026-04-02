@@ -10,10 +10,11 @@
 
 | 路径 | 角色 |
 |------|------|
-| [`timing/models/`](../models/) | **数据类型**：`Kline`/`OHLCV`、`KlineSource`/`ListKlineSource` |
-| [`timing/data/`](../data/) | **行情接入**：`DataEngine`、`timing.data.models`（`BarEvent`/`IngestCompleted`/`RequestKlines`/`PushBars`/`IngestParquetFile`）、[`clients/`](../data/clients/) 各 Client（无统一抽象基类） |
-| [`timing/analysis/`](../analysis/) | **分析**：[`algo/`](../analysis/algo/) 纯算法；`engine.py` 中 `AnalysisEngine`；`models.py` 中 Command/Event |
-| [`timing/engine/`](../engine/) | **`cache.py`**（`CacheEngine`）、**`commands.py`**（加载 cache 内 Command）、**`app.py`**（`TimingApp` 中枢，可选挂载） |
+| [`timing/engine/clock.py`](../engine/clock.py) | **Clock**：`LiveClock`（生产）、`SimulatedClock`（回测）；`config.yaml` 中 `clock: !module ...` 传入类名，`TimingApp` 会实例化 |
+| [`timing/models/`](../models/) | **数据类型**：`OHLCV`（BaseCommand）、`Bar`/`Kline`（别名） |
+| [`timing/data/`](../data/) | **行情接入**：`DataEngine`、`timing.data.models`（`DataIngested`/`PushBars`/`IngestParquetFile`）、[`FileParquetDataClient`](../data/clients/file_parquet.py)（duckdb 读 Parquet，按 `ts` 去重，不写回文件） |
+| [`timing/analysis/`](../analysis/) | **分析**：[`algo/`](../analysis/algo/) 纯算法（dict）；`AnalysisEngine` 注入 Clock；`models.py` 中 Command/Event/Handler |
+| [`timing/engine/`](../engine/) | **`cache.py`**、`clock.py`、**`app.py`**（`TimingApp` 唯一入口，Cache→Data→Analysis 启动顺序） |
 | [`timing/execution/`](../execution/)、[`timing/risk/`](../risk/) | **预留** ExecutionEngine / RiskEngine |
 
 ---
@@ -99,7 +100,7 @@
 
 ### 1.3 数据流 / 指令流 / 事件流
 
-- **数据流**：外部行情 → DataClient（子 AppService）→ DataEngine → `hub.emit(BarEvent)` → Exchange 按 topic 匹配 → Cache/Analysis 等 `AppService.subscribe` 声明的 Handler Command。
+- **数据流**：外部行情 → DataClient（子 AppService）→ DataEngine → `hub.emit(OHLCV(...))` → Exchange 按 topic 匹配 → Cache/Analysis 等 `AppService.subscribe` 声明的 Handler Command。
 - **指令流**：Command 经 Hub（Queue 或直执）→ 目标 `destination` 对应 AppService → `__call__`。
 - **事件流**：`BaseEvent` 与 Command 执行后的 `_publish` 均按 `type(message).destination` 作为 topic 在 Exchange 上匹配；订阅者为 `BaseCommand` 子类，实例化后 `add_event` 再 `dispatch`。
 - **destination 约定**：`domain.alias.CommandName`；前两段解析 `_resolve_app`（选 AppService 与 protocol 上下文），整段字符串作 Exchange 匹配 topic；timing 内 Command/Event 已显式设置 `destination` 以避免 import 顺序导致 `_._` 未改写。
@@ -173,9 +174,9 @@
 |----------------|-------------|------|
 | **TradingNode**（编排） | [`TimingApp`](../../engine/app.py)（`timing.engine.app`，可选单独挂载） | 占位 |
 | **DataEngine** | [`timing.data.engine.DataEngine`](../../data/engine.py) | 已有 |
-| **DataClient**（适配器） | [`ListDataClient`](../../data/clients/list_client.py)、[`FileParquetDataClient`](../../data/clients/file_parquet.py) 等，各自 `AppService`，**无统一 ABC** | 已有 List + Parquet |
+| **DataClient**（适配器） | [`FileParquetDataClient`](../../data/clients/file_parquet.py) 等，各自 `AppService`，**无统一 ABC** | 已有 Parquet |
 | **Cache / Catalog** | [`timing.engine.cache.CacheEngine`](../../engine/cache.py) | 已有 |
-| **消息总线 / 事件** | bollydog `Hub` + `Exchange`；`BarEvent`/`IngestCompleted` 在 [`timing.data.models`](../../data/models.py) | 已有 |
+| **消息总线 / 事件** | bollydog `Hub` + `Exchange`；`OHLCV`（BaseCommand 子类）/`DataIngested` 在 [`timing.data.models`](../../data/models.py) | 已有 |
 | **Actor / 策略逻辑** | [`timing.analysis.algo`](../../analysis/algo/)（纯函数/类） | 已有 |
 | **Portfolio / Execution** | [`timing.execution`](../../execution/)、[`timing.risk`](../../risk/) | 预留 |
 | **InstrumentProvider** | — | 未做 |
@@ -188,7 +189,7 @@
 | DataClient（适配器内） | 各 **Client** 实现（List、File 等），**不强制**公共抽象基类 |
 | 归一化为 Nautilus 类型（Bar, TradeTick 等） | 归一化为 timing 类型（**Bar/Kline** 在 `timing.models`，见下） |
 | request_instrument / request_bars / 回调 | **request_klines**（ListClient）等 |
-| subscribe_trade_ticks / subscribe_bars | 后续 WS Client + `BarEvent` |
+| subscribe_trade_ticks / subscribe_bars | 后续 WS Client + `OHLCV` |
 | DataEngine 接收并路由数据 | **DataEngine** `add_dependency` 各 Client → 写 Cache + 发 Event |
 
 ### 3.3 数据流（行情接入）
@@ -217,7 +218,7 @@
         ┌───────────────────┼───────────────────┐
         ▼                   ▼                   ▼
   Market Data/Cache    MessageBus(Router)    [ 日志/监控 ]
-  (K线/快照持久化)      (BarEvent/TickEvent)
+  (K线/快照持久化)      (OHLCV/TickEvent)
         │                   │
         ▼                   ▼
   [ 按需查询 ]        [ Analysis / 策略 订阅 ]
@@ -244,8 +245,8 @@
 
 - **注册 DataClient**：`register_client(client: DataClient)`，可按 venue/source 标识；Client 可为 AppService 子服务。
 - **请求转发**：`request_klines(source_id, symbol, interval, start_ts, end_ts)` 转发到对应 Client，结果写 Cache 并可选发布事件。
-- **订阅管理**：`subscribe_bars(symbol, interval)` 在对应 Client 上建立订阅；收到数据 → 写 Cache + 发布 `BarEvent` 等至 Router。
-- **与 Hub 对接**：通过 bollydog Router 发布事件（如 `BarEvent`、`TickEvent`），下游 Analysis/策略通过 Router 订阅。
+- **订阅管理**：`subscribe_bars(symbol, interval)` 在对应 Client 上建立订阅；收到数据 → `emit(OHLCV(...))` 至 Exchange。
+- **与 Hub 对接**：通过 bollydog Exchange 发布 OHLCV（BaseCommand 子类，单 bar）/ DataIngested（BaseEvent，批量），下游 Cache/Analysis 通过 `subscribe` 注册 Handler。
 
 #### 3.4.4 Market Data / Cache（AppService，见 §2.2）
 
@@ -257,39 +258,173 @@
 
 | 层级 | 路径/模块 | 内容 |
 |------|-----------|------|
-| **数据类型** | `timing/models/kline.py`、`timing/models/source.py` | `Kline`、`ListKlineSource` 等 |
-| **DataEngine 模型** | `timing/data/models.py` | `BarEvent`、`IngestCompleted`、`RequestKlines`、`PushBars`、`IngestParquetFile` |
-| **Client 实现** | `timing/data/clients/` | `ListDataClient`、`FileParquetDataClient`；后续按需增加 |
+| **数据类型** | `timing/models/kline.py` | `OHLCV`/`Bar`/`Kline` |
+| **DataEngine 模型** | `timing/data/models.py` | `DataIngested`、`PushBars`、`IngestParquetFile`；OHLCV 在 `timing.models.kline` |
+| **Client 实现** | `timing/data/clients/` | `FileParquetDataClient`；后续按需增加 |
 | **DataEngine** | `timing/data/engine.py` | `DataEngine`（AppService）、`router_mapping` |
-| **Cache** | `timing/engine/cache.py` | `CacheEngine`、`AppendBar`、`GetKlines`、`OnBarReceived` |
+| **Cache** | `timing/engine/cache.py` | `CacheEngine`、`GetKlines`、`OnBar`、`OnDataIngested` |
 | **中枢（可选）** | `timing/engine/app.py` | `TimingApp` |
 
 ### 3.6 检查项（行情接入层）
 
-- [x] **无统一 DataClient ABC**：各 Client 自洽；`ListDataClient` 包装 `ListKlineSource`。
-- [x] **ListDataClient**：`timing.data.clients.list_client`，DataEngine 子服务 `add_dependency`。
-- [x] **DataEngine（AppService）**：`RequestKlines` 拉取后对每根 K 线 **先写 Cache 再 `emit(BarEvent)`**（与 HTTP `PushBars` 同序）；不设单独 SubscribeBars Command。
+- [x] **无统一 DataClient ABC**：各 Client 自洽。
+- [x] **DataEngine（AppService）**：Command 只 `emit`（`OHLCV`/`DataIngested`），不直接操作 CacheEngine。
 - [ ] **实时长连接订阅**：交易所 WebSocket 等 → 另增 DataClient 实现与可选 Command（首期未做）。
-- [x] **CacheEngine（AppService）**：`AppendBar` / `GetKlines` / `replace_klines`；**不再**默认 `subscribe` `BarEvent`→`OnBarReceived` 写 Cache（避免与「先写 Cache 再 emit」双写）；`OnBarReceived` 仅作可选手动订阅。
-- [x] **事件与 Exchange**：`BarEvent.destination=timing.DataEngine.BarEvent`；Cache/Analysis 通过 `subscribe` 注册 Handler。
+- [x] **CacheEngine（AppService）**：`subscribe` 订阅 `OHLCV`→`OnBar`（写 Cache）、`DataIngested`→`OnDataIngested`（批量替换 + 返回 revision）；handler 完成后 `_publish` 自动广播 destination。内部存 `List[dict]`。
+- [x] **AnalysisEngine（AppService）**：**不**订阅 `OHLCV`；只订阅 `timing.CacheEngine.OnBar`→`OnBarForAnalysis`（Cache 写入后再从 Cache 读最新价触线）、`timing.CacheEngine.OnDataIngested`→`OnCacheIngested`（批量重算）。注入 Clock。
+- [x] **数据类型与 Exchange**：`OHLCV(BaseCommand)` destination=`timing.DataEngine.OHLCV`；`DataIngested.destination=timing.DataEngine.DataIngested`。
+- [x] **Clock**：`timing/engine/clock.py`；`config.yaml` 可写 `clock: !module timing.engine.clock.LiveClock` 或 `SimulatedClock`（类，由 `TimingApp` 实例化）。
+- [x] **TimingApp 统一入口**：`config.yaml` 只声明 TimingApp + clock 类；内部 CacheEngine → DataEngine → AnalysisEngine。
 - [x] **文档与计划**：与 `config.yaml`、`demo.py` 对齐；CLI：`cd <repo_root> && PYTHONPATH=. bollydog … --config config.yaml`。
+
+### 3.7 Analysis 命令如何组合（主逻辑）
+
+以下均在 `timing.analysis.models`；**斐波那契档位**与**触线**是两条路径：**批量/主动算档** vs **实时触线信号**。
+
+| 名称 | 类型 | 何时触发 | 入参（要点） | 返回 / 副作用 |
+|------|------|----------|--------------|----------------|
+| **ComputeFibRetracement** | Command | 人工或策略 `hub.execute` | `symbol`, `interval`, `start_ts`/`end_ts`, `direction`, swing 窗口 | `GetKlines`→ swing 找腿→`retracement_from_leg`→`AnalysisEngine.set_fib_state`；返回 `leg` + `levels` 列表 |
+| **OnCacheIngested** | Handler | 订阅 `timing.CacheEngine.OnDataIngested`（批量 ingest 且 Cache `replace_klines` 完成后） | 无直接字段，从 handler 链 `state[1]` 取 symbol/interval/revision | `GetKlines` 全量→同上算 fib→`set_fib_state`；返回摘要（含 `revision`） |
+| **OnBarForAnalysis** | Handler | 订阅 `timing.CacheEngine.OnBar`（单根 OHLCV 已写入 Cache 后） | 从链上事件解析 symbol/interval；**成交价**取 **Cache 最后一根** 的 `close` | 若已有 fib 档位：`TouchDetector.check`（Clock 控制冷却）→ 命中则 **`emit(FibLevelTouched)`**；返回触中的 `(ratio, price)` 列表 |
+| **FeedPrice** | Command | 测试或外部显式喂价 | `symbol`, `price`, `levels`, `tolerance` | 不读 Cache；直接对给定 `levels` 做几何触线→可 `emit(FibLevelTouched)` |
+
+**组合关系**：先有 **档位**（`ComputeFibRetracement` 或 **OnCacheIngested** 批量重算），**OnBarForAnalysis** 才能在后续每根 K 线上用最新 `close` 去碰这些档并发 **`FibLevelTouched`**。若从未算过档，`OnBarForAnalysis` 直接跳过（无 levels）。
 
 ---
 
 ## 4. Cache、磁盘文件与事件一致性
 
-**根因**：磁盘 Parquet 为静态快照；内存 Cache 为真相查询面；`BarEvent` 经 Exchange 异步派发。若「文件 ingest 只写 Cache」与「按 bar 发事件拼状态」混用，Analysis 可能按事件增量算一遍，与 `GetKlines` 全文不一致。
+**根因**：磁盘 Parquet 为静态快照；内存 Cache 为真相查询面；事件经 Exchange 异步派发。DataEngine Command **只 emit 事件**，不直接操作 CacheEngine。CacheEngine 通过 `subscribe` 订阅事件并写入 Cache。
 
 **约定**：
 
 1. **查询与计算真相源**：`ComputeFibRetracement` 等以 **`GetKlines` / Cache** 为准，不以「仅拼事件流」重建序列为准。
-2. **批量 Parquet ingest**：读文件 → **`replace_klines` 只更新 Cache**；**不**逐条 `BarEvent`；可选发 **单次** `IngestCompleted`（`symbol, interval, rows, revision`）。下游需重算时订阅该事件后显式 `GetKlines` / `ComputeFibRetracement`。
-3. **实时 HTTP JSON 推送**（`PushBars`）：在同一 `__call__` 内 **逐条 `append_bar` → `emit(BarEvent)`**，保证订阅方读 Cache 与事件顺序一致。启用 HTTP：`BOLLYDOG_HTTP_ENABLED=1`，路由见 DataEngine `router_mapping`。
-4. **可选**：对 `(symbol, interval)` 维护 **`revision`/`ingest_generation`**（全量替换时递增）；`IngestCompleted`/事件可携带，Analysis 可丢弃过期通知。
+2. **批量 Parquet ingest**：`IngestParquetFile` 读文件 → `emit(DataIngested(klines=...))`。CacheEngine 订阅 `DataIngested` 执行 `replace_klines`。AnalysisEngine 订阅 CacheEngine handler completion（`timing.CacheEngine.OnDataIngested`）后从 Cache 读数据重算。
+3. **实时推送**（`PushBars`）：逐条 `emit(OHLCV(...))`。CacheEngine `OnBar` 写 Cache → `_publish` 以 `timing.CacheEngine.OnBar` 广播；AnalysisEngine `OnBarForAnalysis` **仅**在此之后触发，并从 **Cache** 读取该 symbol/interval 最新一根的 `close` 做触线（避免与 Cache 竞态）。
+4. **revision**：`CacheEngine.replace_klines` 递增 revision，通过 `OnDataIngested` handler 返回值（`state[1]`）自动随 `_publish` 传播给下游。
+
+### 4.1 handler 完成即广播（bollydog 机制）
+
+bollydog `_fire` 中 `_run` 执行完 `__call__` 后立即 `_publish`，以 handler 的 `destination` 为 topic 广播。下游可订阅任何 handler 的 destination，收到时上游已执行完毕，`get_event(-1)["state"]` 含 `["FINISHED", return_value]`。
+
+**何时用显式 Event vs 订阅 handler completion：**
+
+| 场景 | 用什么 | 理由 |
+|------|--------|------|
+| 数据源头产出 | `OHLCV`（BaseCommand）/ `DataIngested`（BaseEvent） | 业务数据/事件，多 Service 关心 |
+| 链式依赖（等上游写完再算） | 订阅 handler destination | 零额外定义，`_publish` 天然支持 |
+| 对外通知（触线、成交） | 显式 Event（`FibLevelTouched`） | 外部消费者不应知道内部 handler |
 
 ---
 
-## 5. 文档维护
+## 5. 命令/事件/订阅拓扑
+
+### 5.1 事件流拓扑图
+
+```mermaid
+flowchart LR
+    subgraph data [DataEngine]
+        PushBars[PushBars]
+        IngestPq[IngestParquetFile]
+    end
+
+    subgraph cache [CacheEngine]
+        GetKlines[GetKlines]
+        OnBar["OnBar"]
+        OnDataIng["OnDataIngested"]
+    end
+
+    subgraph analysis [AnalysisEngine]
+        ComputeFib[ComputeFibRetracement]
+        OnBarAna[OnBarForAnalysis]
+        OnCacheIng["OnCacheIngested"]
+    end
+
+    PushBars -->|emit| OhlcvMsg((OHLCV))
+    IngestPq -->|emit| DataIng((DataIngested))
+
+    OhlcvMsg -->|subscribe| OnBar
+    DataIng -->|subscribe| OnDataIng
+
+    OnBar -.->|"_publish"| OnBarAna
+
+    OnDataIng -.->|"_publish"| OnCacheIng
+
+    OnBarAna -->|emit| FibTch((FibLevelTouched))
+    ComputeFib -->|"hub.execute"| GetKlines
+    OnCacheIng -->|"hub.execute"| GetKlines
+```
+
+虚线 = bollydog `_publish` 自动广播（handler 完成后以 destination 为 topic，不需要显式 emit）。
+
+### 5.2 DataEngine（[`timing/data/`](../data/)）
+
+**定义：**
+
+| 类型 | 名称 | destination | payload |
+|------|------|-------------|---------|
+| Command | `PushBars` | `timing.DataEngine.PushBars` | symbol, interval, bars |
+| Command | `IngestParquetFile` | `timing.DataEngine.IngestParquetFile` | path, symbol, interval |
+| Data | `OHLCV` | `timing.DataEngine.OHLCV` | symbol, interval, open, high, low, close, volume, ts |
+| Event | `DataIngested` | `timing.DataEngine.DataIngested` | symbol, interval, klines, source |
+
+订阅：无。emit：`OHLCV`（仅 CacheEngine.OnBar 订阅）、`DataIngested`（CacheEngine.OnDataIngested）。Analysis 不直连 `OHLCV`，只订阅 `OnBar` / `OnDataIngested` 的 handler 完成广播。
+
+### 5.3 CacheEngine（[`timing/engine/cache.py`](../engine/cache.py)）
+
+**定义：**
+
+| 类型 | 名称 | destination | 返回值 |
+|------|------|-------------|--------|
+| Command | `GetKlines` | `timing.CacheEngine.GetKlines` | `List[dict]` |
+| Handler | `OnBar` | `timing.CacheEngine.OnBar` | `True` |
+| Handler | `OnDataIngested` | `timing.CacheEngine.OnDataIngested` | `{"revision", "rows", "symbol", "interval"}` |
+
+无显式 Event。handler 返回后 `_publish` 自动广播 destination。内部存 `List[dict]`。
+
+**订阅（入）：**
+
+| topic | Handler | 行为 |
+|-------|---------|------|
+| `timing.DataEngine.OHLCV` | `OnBar` | event 取 open/high/low/close/volume/ts → `append_bar` |
+| `timing.DataEngine.DataIngested` | `OnDataIngested` | event 取 klines → `replace_klines` → 返回含 revision 的 dict |
+
+**_publish 自动广播（出）：**
+
+| topic | state[1] | 被谁订阅 |
+|-------|----------|---------|
+| `timing.CacheEngine.OnBar` | `True` | **AnalysisEngine.OnBarForAnalysis** |
+| `timing.CacheEngine.OnDataIngested` | `{"revision": N, "rows": M, "symbol": ..., "interval": ...}` | **AnalysisEngine.OnCacheIngested** |
+
+### 5.4 AnalysisEngine（[`timing/analysis/`](../analysis/)）
+
+**定义：**
+
+| 类型 | 名称 | destination | payload |
+|------|------|-------------|---------|
+| Command | `ComputeFibRetracement` | `timing.AnalysisEngine.ComputeFibRetracement` | symbol, interval, ... |
+| Command | `FeedPrice` | `timing.AnalysisEngine.FeedPrice` | symbol, price, levels, tolerance |
+| Handler | `OnBarForAnalysis` | `timing.AnalysisEngine.OnBarForAnalysis` | - |
+| Handler | `OnCacheIngested` | `timing.AnalysisEngine.OnCacheIngested` | - |
+| Event | `FibLevelTouched` | `timing.AnalysisEngine.FibLevelTouched` | symbol, ratio, level_price, touch_price |
+
+**订阅（入）：**
+
+| topic | Handler | 传播方式 | 行为 |
+|-------|---------|---------|------|
+| `timing.CacheEngine.OnBar` | `OnBarForAnalysis` | _publish（OnBar 完成后） | 从 Cache 读最新 `close` → 触线检测（与 Cache 一致） |
+| `timing.CacheEngine.OnDataIngested` | `OnCacheIngested` | _publish 自动广播 | 检查 state → GetKlines → 重算 fib |
+
+**显式 emit（出）：** `FibLevelTouched`（被 ExecutionEngine 预留订阅）。
+
+### 5.5 ExecutionEngine / RiskEngine（预留）
+
+- Execution 订阅 `timing.AnalysisEngine.FibLevelTouched` 或 handler completion
+- Risk 订阅 Execution handler/event
+
+---
+
+## 6. 文档维护
 
 - **整体架构**：以本文 §1 为准；若调整分层或框图，同步更新 task_plan.md 中的架构图引用或精简版。
 - **引擎层**：仅包含四个引擎（DataEngine、Market Data/Cache、Analysis Engine、ExecutionEngine/RiskEngine）；每个引擎及其组件均为 bollydog AppService/子服务，以 §2 与 §1.2.3 为准。

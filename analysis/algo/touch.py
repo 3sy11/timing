@@ -1,6 +1,7 @@
 """触线检测与去抖。"""
-import time
-from typing import List, Tuple
+from typing import List, Tuple, TYPE_CHECKING
+if TYPE_CHECKING:
+    from timing.engine.clock import Clock
 
 
 def check_touch(price: float, levels: List[Tuple[float, float]], tolerance: float) -> List[Tuple[float, float]]:
@@ -8,12 +9,16 @@ def check_touch(price: float, levels: List[Tuple[float, float]], tolerance: floa
 
 
 class TouchDetector:
-    def __init__(self, cooldown_sec: float = 60.0):
+    def __init__(self, cooldown_sec: float = 60.0, clock: "Clock" = None):
         self.cooldown = cooldown_sec
+        self._clock = clock
         self._last: dict = {}
 
     def check(self, price: float, levels: List[Tuple[float, float]], tolerance: float) -> List[Tuple[float, float]]:
-        now = time.time()
+        if self._clock:
+            now = self._clock.now_sec()
+        else:
+            import time; now = time.time()
         touched = check_touch(price, levels, tolerance)
         out = []
         for r, p in touched:

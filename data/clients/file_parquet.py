@@ -1,14 +1,15 @@
-"""Parquet 读入 Kline。"""
+"""duckdb 读取 Parquet → List[dict]；同一 ts 多行时保留最后一行（不改源文件）。"""
 from typing import Dict, List
-
-import pyarrow.parquet as pq
-
-from timing.models.kline import Kline
+import duckdb
 from bollydog.models.service import AppService
 
 
-def _norm_map(names: List[str]) -> Dict[str, str]:
-    return {n.lower(): n for n in names}
+def _dedupe_by_ts(rows: List[dict]) -> List[dict]:
+    by_ts: Dict[int, dict] = {}
+    for r in rows:
+        ts = int(r["ts"])
+        by_ts[ts] = r
+    return [by_ts[t] for t in sorted(by_ts)]
 
 
 class FileParquetDataClient(AppService):
@@ -16,46 +17,37 @@ class FileParquetDataClient(AppService):
     alias = "FileParquetDataClient"
 
     @staticmethod
-    def read_klines(path: str) -> List[Kline]:
-        t = pq.read_table(path)
-        cmap = _norm_map(list(t.column_names))
-
-        def pick(*cands: str) -> str:
-            for c in cands:
-                if c.lower() in cmap:
-                    return cmap[c.lower()]
-            raise ValueError(f"parquet 缺少列，尝试过: {cands}")
-
-        c_open = pick("open", "o")
-        c_high = pick("high", "h")
-        c_low = pick("low", "l")
-        c_close = pick("close", "c")
-        c_ts = pick("ts", "timestamp", "time")
-        c_vol = cmap.get("volume") or cmap.get("vol") or cmap.get("v")
-        n = t.num_rows
-        o = t.column(c_open).to_pylist()
-        h = t.column(c_high).to_pylist()
-        lo = t.column(c_low).to_pylist()
-        cl = t.column(c_close).to_pylist()
-        ts = t.column(c_ts).to_pylist()
-        vo = t.column(c_vol).to_pylist() if c_vol else [0.0] * n
-        out: List[Kline] = []
-        for i in range(n):
-            tv = ts[i]
+    def read_klines(path: str) -> List[dict]:
+        conn = duckdb.connect()
+        try:
+            cols = [r[0].lower() for r in conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{path}')").fetchall()]
+            col_map = {c: c for c in cols}
+            def pick(*cands):
+                for c in cands:
+                    if c.lower() in col_map:
+                        return col_map[c.lower()]
+                raise ValueError(f"parquet 缺少列，尝试过: {cands}")
+            c_open, c_high, c_low, c_close = pick("open", "o"), pick("high", "h"), pick("low", "l"), pick("close", "c")
+            c_ts = pick("ts", "timestamp", "time")
+            c_vol = col_map.get("volume") or col_map.get("vol") or col_map.get("v")
+            sel = f'"{c_open}" as open, "{c_high}" as high, "{c_low}" as low, "{c_close}" as close, "{c_ts}" as ts'
+            if c_vol:
+                sel += f', "{c_vol}" as volume'
+            rows = conn.execute(f"SELECT {sel} FROM read_parquet('{path}') ORDER BY \"{c_ts}\"").fetchall()
+            desc = conn.execute(f"SELECT {sel} FROM read_parquet('{path}') LIMIT 0").description
+            names = [d[0] for d in desc]
+        finally:
+            conn.close()
+        out: List[dict] = []
+        has_vol = "volume" in names
+        for r in rows:
+            tv = r[names.index("ts")]
             if hasattr(tv, "timestamp"):
                 ts_ms = int(tv.timestamp() * 1000)
             else:
                 x = float(tv)
                 ts_ms = int(x) if x > 1e12 else int(x * 1000)
-            out.append(
-                Kline(
-                    open=float(o[i]),
-                    high=float(h[i]),
-                    low=float(lo[i]),
-                    close=float(cl[i]),
-                    volume=float(vo[i] if i < len(vo) else 0),
-                    ts=ts_ms,
-                )
-            )
-        out.sort(key=lambda x: x.ts)
-        return out
+            d = {"open": float(r[0]), "high": float(r[1]), "low": float(r[2]), "close": float(r[3]),
+                 "ts": ts_ms, "volume": float(r[names.index("volume")]) if has_vol else 0.0}
+            out.append(d)
+        return _dedupe_by_ts(out)
