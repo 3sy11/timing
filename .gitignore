@@ -9,3 +9,4 @@ wheels/
 # Virtual environments
 .venv
 warehouse
+.DS_Store

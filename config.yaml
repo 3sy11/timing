@@ -1,4 +1,4 @@
-# 与仓库根 config.yaml 一致；从仓库根执行：PYTHONPATH=/path/to/3sy11 uv run … --config config.yaml
+# 与仓库根 config.yaml 一致
 timing:
   app: !module timing.engine.app.TimingApp
-  clock: !module timing.engine.clock.LiveClock
+  clock: !module timing.common.clock.LiveClock

@@ -2,12 +2,8 @@
 name = "timing"
 version = "0.1.0"
 description = "交易系统首期：斐波那契回撤 + 触线，基于 bollydog"
-requires-python = ">=3.11"
+requires-python = "==3.12.13"
 dependencies = [
-    "pydantic>=2",
-    "bollydog",
-    "duckdb",
+    "pydantic==2.12.5",
+    "duckdb==1.5.1",
 ]
-
-[tool.uv.sources]
-bollydog = { path = "../bollydog", editable = true }

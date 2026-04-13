@@ -1,4 +1,4 @@
-"""引擎目录：cache、TimingApp。DataEngine / AnalysisEngine 见 timing.data、timing.analysis。"""
+"""引擎目录：cache、TimingApp。"""
 from timing.engine.cache import CacheEngine
 
 __all__ = ["CacheEngine"]

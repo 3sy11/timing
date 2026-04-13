@@ -1,41 +1,43 @@
-"""K 线缓存引擎：内存 dict 存储 + subscribe handler。
-handler 完成后 bollydog _publish 自动以 destination 广播，下游可订阅 handler completion。"""
+"""CacheEngine：系统内唯一数据真相源。内部存 List[dict]。
+遵循 SKILL.md：Command 通过 globals.app 访问所属 Service。"""
+import logging
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
-from bollydog.globals import hub
+from bollydog.globals import app, hub
 from bollydog.models.base import BaseCommand
 from bollydog.models.service import AppService
 
+log = logging.getLogger(__name__)
 
-class OnBar(BaseCommand):
-    """subscribe timing.DataEngine.OHLCV → 单 bar 写入 Cache。"""
-    destination: ClassVar[str] = "timing.CacheEngine.OnBar"
+
+class OnBarReceived(BaseCommand):
+    """subscriber: timing.DataEngine.PushBars → bars 写入 Cache。"""
+    destination: ClassVar[str] = "timing.CacheEngine.OnBarReceived"
     async def __call__(self, *args, **kwargs) -> Any:
         raw = self.get_event(-1)
-        if not raw:
-            return None
-        sym, interval = raw.get("symbol"), raw.get("interval")
-        if not (sym and interval):
-            return None
-        bar = {k: raw[k] for k in ("open", "high", "low", "close", "volume", "ts") if k in raw}
-        hub.get_service("timing.CacheEngine").append_bar(sym, interval, bar)
-        return True
+        if not raw: return None
+        info = raw.get("state", [None, None])[1]
+        if not isinstance(info, dict): return None
+        sym, interval, bars = info.get("symbol", ""), info.get("interval", ""), info.get("bars", [])
+        if not (sym and bars): return None
+        for bar in bars: app.append_bar(sym, interval, bar)
+        log.info(f'[Cache] append_bar {sym}/{interval} +{len(bars)} bars, total={len(app.get_klines(sym, interval))}')
+        return {"symbol": sym, "interval": interval, "count": len(bars)}
 
 
 class OnDataIngested(BaseCommand):
-    """subscribe timing.DataEngine.DataIngested → 批量替换 Cache。
-    返回值含 revision/rows/symbol/interval，_publish 自动广播给下游。"""
+    """subscriber: timing.DataEngine.IngestParquetFile → 批量替换。"""
     destination: ClassVar[str] = "timing.CacheEngine.OnDataIngested"
     async def __call__(self, *args, **kwargs) -> Any:
         raw = self.get_event(-1)
-        if not raw:
-            return None
-        sym, interval = raw.get("symbol", ""), raw.get("interval", "")
-        klines_dicts = raw.get("klines", [])
-        if not (sym and interval and klines_dicts):
-            return None
-        cache = hub.get_service("timing.CacheEngine")
-        rev = cache.replace_klines(sym, interval, klines_dicts)
-        return {"revision": rev, "rows": len(klines_dicts), "symbol": sym, "interval": interval}
+        if not raw: return None
+        info = raw.get("state", [None, None])[1]
+        if not isinstance(info, dict): return None
+        sym, interval = info.get("symbol", ""), info.get("interval", "")
+        klines = info.get("klines", [])
+        if not (sym and klines): return None
+        rev = app.replace_klines(sym, interval, klines)
+        log.info(f'[Cache] replace_klines {sym}/{interval} rows={len(klines)} rev={rev}')
+        return {"revision": rev, "rows": len(klines), "symbol": sym, "interval": interval}
 
 
 class GetKlines(BaseCommand):
@@ -46,16 +48,16 @@ class GetKlines(BaseCommand):
     start_ts: Optional[int] = None
     end_ts: Optional[int] = None
     async def __call__(self, *args, **kwargs) -> Any:
-        return hub.get_service("timing.CacheEngine").get_klines(self.symbol, self.interval, self.start_ts, self.end_ts)
+        return app.get_klines(self.symbol, self.interval, self.start_ts, self.end_ts)
 
 
 class CacheEngine(AppService):
     domain = "timing"
     alias = "CacheEngine"
     commands = ["commands"]
-    subscribe = {
-        "timing.DataEngine.OHLCV": OnBar,
-        "timing.DataEngine.DataIngested": OnDataIngested,
+    subscriber = {
+        "timing.DataEngine.PushBars": OnBarReceived,
+        "timing.DataEngine.IngestParquetFile": OnDataIngested,
     }
 
     def __init__(self, **kwargs):
@@ -81,11 +83,10 @@ class CacheEngine(AppService):
 
     def get_klines(self, symbol: str, interval: str, start_ts: Optional[int] = None, end_ts: Optional[int] = None) -> List[dict]:
         rows = list(self._store.get((symbol, interval), []))
-        if start_ts is not None:
-            rows = [x for x in rows if x["ts"] >= start_ts]
-        if end_ts is not None:
-            rows = [x for x in rows if x["ts"] <= end_ts]
+        if start_ts is not None: rows = [x for x in rows if x["ts"] >= start_ts]
+        if end_ts is not None: rows = [x for x in rows if x["ts"] <= end_ts]
         return rows
 
-
-__all__ = ["CacheEngine", "GetKlines", "OnBar", "OnDataIngested"]
+    async def on_reset(self) -> None:
+        self._store.clear()
+        self._revision.clear()
