@@ -10,3 +10,5 @@ wheels/
 .venv
 warehouse
 .DS_Store
+tmp/timing.duckdb
+info.log

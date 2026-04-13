@@ -1,1 +1,1 @@
-from .touch import TouchDetector, check_touch
+from .command import TouchDetector, check_touch, FeedPrice

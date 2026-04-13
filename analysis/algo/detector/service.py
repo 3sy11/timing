@@ -1,15 +1,15 @@
-"""DetectorService：管理 detectors 状态，对外暴露 check_bars / reset。"""
+"""DetectorService：管理 detectors 状态，计算委托给 command.py 纯函数。"""
 from typing import Dict, List, Tuple
 from bollydog.models.service import AppService
 from timing.analysis.config import FibConfig
 from timing.common.clock import Clock, LiveClock
-from .touch import TouchDetector
+from .command import TouchDetector
 
 
 class DetectorService(AppService):
     domain = "timing"
     alias = "DetectorService"
-    commands = []
+    commands = ["timing.analysis.algo.detector.command"]
 
     def __init__(self, clock: Clock = None, **kwargs):
         super().__init__(**kwargs)

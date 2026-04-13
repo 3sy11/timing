@@ -1,9 +1,14 @@
-"""duckdb 读取 Parquet → List[dict]；同一 ts 多行时保留最后一行（不改源文件）。
-支持 OHLCV.meta CSV 映射文件：第一列 Kline 标准字段，第二列 parquet 实际列名。"""
+"""duckdb 读取 Parquet → List[dict]；同一 ts 多行时保留最后一行。
+支持 OHLCV.meta CSV 映射文件：第一列 Kline 标准字段，第二列 parquet 实际列名。
+Jupyter:
+    from timing.data.clients.file import read_klines
+    klines = read_klines("/path/to/parquet_dir")
+"""
 import csv, os
 from datetime import datetime
-from typing import Dict, List
+from typing import Any, ClassVar, Dict, List
 import duckdb
+from bollydog.models.base import BaseCommand
 from bollydog.models.service import AppService
 
 KLINE_FIELDS = ("ts", "open", "high", "low", "close", "volume")
@@ -48,7 +53,7 @@ def _to_float(val) -> float:
 
 
 def read_klines(path: str) -> List[dict]:
-    """纯函数：读取 parquet → List[dict]。无 Service 依赖，可直接在 Jupyter 调用。"""
+    """纯函数：读取 parquet → List[dict]。直接 duckdb 读取，无 Service 依赖。"""
     if os.path.isdir(path):
         data_dir, path = path, os.path.join(path, "*.parquet")
     else:
@@ -81,7 +86,17 @@ def read_klines(path: str) -> List[dict]:
     return _dedupe_by_ts(out)
 
 
-class FileParquetDataClient(AppService):
-    """Service 层：只负责生命周期管理，读取逻辑在模块级 read_klines。"""
+class ReadParquetKlines(BaseCommand):
+    """读取 Parquet → 标准 Kline list[dict]。纯计算，无 protocol。
+    Jupyter: cmd = ReadParquetKlines(path="..."); result = await cmd()"""
+    destination: ClassVar[str] = "timing.DataEngine.ReadParquetKlines"
+    path: str = ""
+    async def __call__(self, *args, **kwargs) -> Any:
+        return {"klines": read_klines(self.path)}
+
+
+class FileDataClient(AppService):
+    """Parquet 文件数据源，生命周期管理。"""
     domain = "timing"
-    alias = "FileParquetDataClient"
+    alias = "FileDataClient"
+    commands = ["timing.data.clients.file"]

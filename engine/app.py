@@ -21,10 +21,9 @@ class TimingApp(AppService):
         elif isinstance(clock, type): self.clock = clock()
         else: self.clock = clock
         os.makedirs('tmp', exist_ok=True)
-        data_proto = DuckDBProtocol(url='tmp/timing.duckdb')
         analysis_proto = DuckDBProtocol(url='tmp/timing.duckdb')
         self.cache = CacheEngine()
-        self.data = DataEngine(protocol=data_proto)
+        self.data = DataEngine()
         self.analysis = AnalysisEngine(clock=self.clock, protocol=analysis_proto)
         self.add_dependency(self.cache)
         self.add_dependency(self.data)
