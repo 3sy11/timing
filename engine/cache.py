@@ -25,7 +25,7 @@ class OnBarReceived(BaseCommand):
 
 
 class OnDataIngested(BaseCommand):
-    """subscriber: timing.DataEngine.IngestParquetFile → 批量替换。"""
+    """subscriber: timing.DataEngine.IngestKlinesFromFile → 批量替换。上游 klines: list[dict]。"""
     destination: ClassVar[str] = "timing.CacheEngine.OnDataIngested"
     async def __call__(self, *args, **kwargs) -> Any:
         raw = self.get_event(-1)
@@ -57,7 +57,7 @@ class CacheEngine(AppService):
     commands = ["commands"]
     subscriber = {
         "timing.DataEngine.PushBars": OnBarReceived,
-        "timing.DataEngine.IngestParquetFile": OnDataIngested,
+        "timing.DataEngine.IngestKlinesFromFile": OnDataIngested,
     }
 
     def __init__(self, **kwargs):

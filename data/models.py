@@ -2,7 +2,7 @@
 from typing import Any, ClassVar, List
 from pydantic import Field
 from bollydog.models.base import BaseCommand
-from timing.data.clients.file import read_klines
+from timing.data.clients.file import read_file
 
 
 class PushBars(BaseCommand):
@@ -19,12 +19,12 @@ class PushBars(BaseCommand):
         return {"symbol": self.symbol, "interval": self.interval, "bars": processed}
 
 
-class IngestParquetFile(BaseCommand):
-    """读 Parquet，_publish 广播给订阅者。"""
-    destination: ClassVar[str] = "timing.DataEngine.IngestParquetFile"
+class IngestKlinesFromFile(BaseCommand):
+    """从目录或单文件的 parquet/csv 读入 K 线（duckdb+pandas+OHLCV.meta），写入返回体供 Cache 订阅。"""
+    destination: ClassVar[str] = "timing.DataEngine.IngestKlinesFromFile"
     path: str = ""
     symbol: str = ""
     interval: str = ""
     async def __call__(self, *args, **kwargs) -> Any:
-        klines = read_klines(self.path)
+        klines = read_file(self.path)
         return {"symbol": self.symbol, "interval": self.interval, "klines": klines}

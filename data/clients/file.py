@@ -1,102 +1,78 @@
-"""duckdb 读取 Parquet → List[dict]；同一 ts 多行时保留最后一行。
-支持 OHLCV.meta CSV 映射文件：第一列 Kline 标准字段，第二列 parquet 实际列名。
-Jupyter:
-    from timing.data.clients.file import read_klines
-    klines = read_klines("/path/to/parquet_dir")
-"""
-import csv, os
-from datetime import datetime
-from typing import Any, ClassVar, Dict, List
+"""duckdb .df() 读 parquet/csv → pandas 按 OHLCV.meta 规整 → list[dict]。
+读文件 Command 在 timing.data.models.IngestKlinesFromFile，此处仅纯函数 read_file。"""
+import csv, logging, os
+from typing import Dict, List
 import duckdb
-from bollydog.models.base import BaseCommand
-from bollydog.models.service import AppService
+import pandas as pd
 
-KLINE_FIELDS = ("ts", "open", "high", "low", "close", "volume")
-
-
-def _dedupe_by_ts(rows: List[dict]) -> List[dict]:
-    by_ts: Dict[int, dict] = {}
-    for r in rows: by_ts[int(r["ts"])] = r
-    return [by_ts[t] for t in sorted(by_ts)]
+log = logging.getLogger(__name__)
 
 
 def _read_meta(directory: str) -> Dict[str, str]:
-    meta_path = os.path.join(directory, "OHLCV.meta")
-    if not os.path.isfile(meta_path): return {}
-    mapping = {}
-    with open(meta_path, "r") as f:
+    p = os.path.join(directory, "OHLCV.meta")
+    if not os.path.isfile(p): return {}
+    m = {}
+    with open(p, "r") as f:
         for row in csv.reader(f):
-            if len(row) >= 2 and row[0].strip() and row[1].strip():
-                mapping[row[0].strip()] = row[1].strip()
-    return mapping
+            if len(row) >= 2 and row[0].strip() and row[1].strip(): m[row[0].strip()] = row[1].strip()
+    return m
 
 
-def _to_ts_ms(val) -> int:
-    if val is None: raise ValueError("ts value is None")
-    if hasattr(val, "timestamp"): return int(val.timestamp() * 1000)
-    if isinstance(val, str):
-        val = val.strip()
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y%m%d"):
-            try: return int(datetime.strptime(val, fmt).timestamp() * 1000)
-            except ValueError: continue
-        try:
-            x = float(val.replace(",", ""))
-            return int(x) if x > 1e12 else int(x * 1000)
-        except ValueError: raise ValueError(f"Cannot convert '{val}' to timestamp")
-    x = float(val)
-    return int(x) if x > 1e12 else int(x * 1000)
-
-
-def _to_float(val) -> float:
-    if isinstance(val, str): return float(val.replace(",", ""))
-    return float(val)
-
-
-def read_klines(path: str) -> List[dict]:
-    """纯函数：读取 parquet → List[dict]。直接 duckdb 读取，无 Service 依赖。"""
+def _resolve_source(path: str):
     if os.path.isdir(path):
-        data_dir, path = path, os.path.join(path, "*.parquet")
-    else:
-        data_dir = os.path.dirname(path)
+        for ext, fn in ((".parquet", "read_parquet"), (".csv", "read_csv_auto")):
+            if any(f.endswith(ext) for f in os.listdir(path)):
+                return path, os.path.join(path, f"*{ext}"), fn
+        raise FileNotFoundError(f"no parquet/csv in {path}")
+    return os.path.dirname(path), path, ("read_csv_auto" if path.endswith(".csv") else "read_parquet")
+
+
+def _ts_to_ms(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(s):
+        n = pd.to_numeric(s, errors="coerce").astype("float64")
+        return (n.where(n > 1e12, n * 1000)).astype("int64")
+    t = pd.to_datetime(s, errors="coerce").astype("datetime64[ns]")
+    return (t.astype("int64") // 1_000_000).astype("int64")
+
+
+def _apply_meta(df: pd.DataFrame, meta: Dict[str, str]) -> pd.DataFrame:
+    if "ts" not in meta: raise ValueError("OHLCV.meta must map 'ts'")
+    for std, raw in meta.items():
+        if raw not in df.columns: raise ValueError(f"OHLCV.meta: column '{raw}' not in file ({list(df.columns)})")
+    order = list(meta.keys())
+    out = df[[meta[k] for k in order]].rename(columns={meta[k]: k for k in order})
+    return out
+
+
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """无 meta：要求存在 ts/open/high/low/close（列名大小写不敏感）。"""
+    lower = {str(c).strip().lower(): c for c in df.columns}
+    need = ("ts", "open", "high", "low", "close")
+    miss = [x for x in need if x not in lower]
+    if miss: raise ValueError(f"parquet 缺少列 {miss}，请在目录下放 OHLCV.meta 映射")
+    out = pd.DataFrame({k: df[lower[k]] for k in need})
+    if "volume" in lower: out["volume"] = df[lower["volume"]]
+    return out
+
+
+def read_file(path: str) -> List[dict]:
+    """duckdb 读文件 → pandas 按元信息处理 → list[dict]（字典列表）。"""
+    data_dir, glob, reader = _resolve_source(path)
     meta = _read_meta(data_dir)
-    conn = duckdb.connect()
-    try:
-        if meta:
-            ts_src = meta.get("ts")
-            if not ts_src: raise ValueError("OHLCV.meta must map 'ts'")
-            selects = [f'"{meta[kf]}" as {kf}' for kf in KLINE_FIELDS if meta.get(kf)]
-            sql = f"SELECT {', '.join(selects)} FROM read_parquet('{path}') ORDER BY \"{ts_src}\""
-        else:
-            cols = {r[0].lower() for r in conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{path}')").fetchall()}
-            missing = [f for f in ("open", "high", "low", "close", "ts") if f not in cols]
-            if missing: raise ValueError(f"parquet 缺少必需列: {missing}，请在数据目录创建 OHLCV.meta 映射文件")
-            selects = [f'"{f}" as {f}' for f in KLINE_FIELDS if f in cols]
-            sql = f"SELECT {', '.join(selects)} FROM read_parquet('{path}') ORDER BY \"ts\""
-        rows = conn.execute(sql).fetchall()
-        names = [d[0] for d in conn.execute(f"{sql} LIMIT 0").description]
-    finally:
-        conn.close()
-    out: List[dict] = []
-    has_vol = "volume" in names
-    ti = names.index("ts")
-    for r in rows:
-        out.append({"open": _to_float(r[names.index("open")]), "high": _to_float(r[names.index("high")]),
-                     "low": _to_float(r[names.index("low")]), "close": _to_float(r[names.index("close")]),
-                     "ts": _to_ts_ms(r[ti]), "volume": _to_float(r[names.index("volume")]) if has_vol else 0.0})
-    return _dedupe_by_ts(out)
-
-
-class ReadParquetKlines(BaseCommand):
-    """读取 Parquet → 标准 Kline list[dict]。纯计算，无 protocol。
-    Jupyter: cmd = ReadParquetKlines(path="..."); result = await cmd()"""
-    destination: ClassVar[str] = "timing.DataEngine.ReadParquetKlines"
-    path: str = ""
-    async def __call__(self, *args, **kwargs) -> Any:
-        return {"klines": read_klines(self.path)}
-
-
-class FileDataClient(AppService):
-    """Parquet 文件数据源，生命周期管理。"""
-    domain = "timing"
-    alias = "FileDataClient"
-    commands = ["timing.data.clients.file"]
+    sql = f"SELECT * FROM {reader}('{glob}')"
+    with duckdb.connect() as conn:
+        df = conn.sql(sql).df()
+    log.info(f"[file] read {glob} rows={len(df)} meta={bool(meta)}")
+    if meta:
+        df = _apply_meta(df, meta)
+    else:
+        df = _normalize_columns(df)
+    df["ts"] = _ts_to_ms(df["ts"])
+    for c in ("open", "high", "low", "close"):
+        df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "", regex=False), errors="coerce").astype("float64")
+    if "volume" in df.columns:
+        df["volume"] = pd.to_numeric(df["volume"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0.0).astype("float64")
+    else:
+        df["volume"] = 0.0
+    df = df.drop_duplicates(subset=["ts"], keep="last").sort_values("ts").reset_index(drop=True)
+    return df.to_dict("records")

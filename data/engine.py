@@ -1,5 +1,4 @@
-"""行情接入：挂载文件数据源，HTTP router_mapping。"""
-from timing.data.clients.file import FileDataClient
+"""行情接入：HTTP router_mapping；读文件逻辑在 clients.file.read_file + models.IngestKlinesFromFile。"""
 from bollydog.models.service import AppService
 
 
@@ -9,10 +8,5 @@ class DataEngine(AppService):
     commands = ["models"]
     router_mapping = {
         "PushBars": ["POST", "/api/timing/push_bars"],
-        "IngestParquetFile": ["POST", "/api/timing/ingest_parquet_file"],
+        "IngestKlinesFromFile": ["POST", "/api/timing/ingest_klines_from_file"],
     }
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.file_client = FileDataClient()
-        self.add_dependency(self.file_client)

@@ -11,6 +11,7 @@ wheels/
 warehouse
 .DS_Store
 tmp/timing.duckdb
-info.log
 *.log
 .env
+notebook/
+.idea/
