@@ -1,4 +1,5 @@
 """Retracement 算法参数：swing 拐点 + fib 回撤一体化配置。"""
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
@@ -7,6 +8,8 @@ DEFAULT_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
 
 @dataclass
 class RetracementConfig:
+    # 持久化
+    db_path: str = os.environ.get("TIMING_RETRACEMENT_DB_PATH", "cache/retracement.sqlite")
     # swing 拐点
     pivot_windows: List[Tuple[int, int]] = field(default_factory=lambda: [(5, 5), (8, 8)])
     zigzag_thresholds: List[float] = field(default_factory=lambda: [0.05, 0.10])

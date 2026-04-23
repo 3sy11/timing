@@ -1,4 +1,4 @@
-"""引擎目录：cache、TimingApp。"""
-from timing.engine.cache import CacheEngine
+"""引擎目录：TimingApp。"""
+from timing.engine.app import TimingApp
 
-__all__ = ["CacheEngine"]
+__all__ = ["TimingApp"]

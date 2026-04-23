@@ -1,13 +1,11 @@
 """TimingApp 中枢：统一入口，按依赖顺序启动各引擎。
-启动顺序：CacheEngine → DataEngine → AnalysisEngine。
-YAML 可传 clock: !module timing.common.clock.SimulatedClock。"""
+启动顺序：DataEngine → AnalysisEngine。
+各引擎内部自建 protocol，无需外部传递。"""
 import os
 from timing.common.clock import Clock, LiveClock
-from timing.engine.cache import CacheEngine
 from timing.data.engine import DataEngine
 from timing.analysis.engine import AnalysisEngine
 from bollydog.models.service import AppService
-from bollydog.adapters.rdb import DuckDBProtocol
 
 
 class TimingApp(AppService):
@@ -20,11 +18,8 @@ class TimingApp(AppService):
         if clock is None: self.clock = LiveClock()
         elif isinstance(clock, type): self.clock = clock()
         else: self.clock = clock
-        os.makedirs('tmp', exist_ok=True)
-        analysis_proto = DuckDBProtocol(url='tmp/timing.duckdb')
-        self.cache = CacheEngine()
+        os.makedirs('cache', exist_ok=True)
         self.data = DataEngine()
-        self.analysis = AnalysisEngine(clock=self.clock, protocol=analysis_proto)
-        self.add_dependency(self.cache)
+        self.analysis = AnalysisEngine()
         self.add_dependency(self.data)
         self.add_dependency(self.analysis)

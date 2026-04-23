@@ -8,4 +8,6 @@ dependencies = [
     "duckdb==1.5.1",
     "pandas>=3.0.2",
     "plotly>=6.7.0",
+    "aiosqlite>=0.22.1",
+    "duckdb-engine>=0.17.0",
 ]
