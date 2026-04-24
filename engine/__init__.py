@@ -1,4 +1,4 @@
-"""引擎目录：TimingApp。"""
-from timing.engine.app import TimingApp
+"""引擎目录：TimingApp + BacktestApp。"""
+from timing.engine.app import TimingApp, BacktestApp
 
-__all__ = ["TimingApp"]
+__all__ = ["TimingApp", "BacktestApp"]

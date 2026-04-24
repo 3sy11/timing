@@ -1,6 +1,6 @@
-"""DataEngine Command：PushBars / IngestKlinesFromFile 直接操作 app(DataEngine) 的 protocol。"""
+"""DataEngine Command：PushBars / IngestKlinesFromFile / SetSymbolConfig 直接操作 app(DataEngine)。"""
 import logging
-from typing import Any, ClassVar, List
+from typing import Any, ClassVar, Dict, List
 from pydantic import Field
 from bollydog.globals import app
 from bollydog.models.base import BaseCommand
@@ -34,3 +34,16 @@ class IngestKlinesFromFile(BaseCommand):
         await app.set_klines(self.symbol, self.interval, klines)
         log.info(f'[Data] IngestKlines {self.symbol}/{self.interval} rows={len(klines)}')
         return {"symbol": self.symbol, "interval": self.interval, "klines": klines}
+
+
+class SetSymbolConfig(BaseCommand):
+    """设置 symbol/interval 的覆盖参数（JSON），下游服务 merge 默认配置后使用。"""
+    destination: ClassVar[str] = "timing.DataEngine.SetSymbolConfig"
+    symbol: str = ""
+    interval: str = ""
+    config: Dict[str, Any] = Field(default_factory=dict)
+    async def __call__(self, *args, **kwargs) -> Any:
+        if not (self.symbol and self.interval): return None
+        await app.set_symbol_config(self.symbol, self.interval, self.config)
+        log.info(f'[Data] SetSymbolConfig {self.symbol}/{self.interval} keys={list(self.config.keys())}')
+        return {"symbol": self.symbol, "interval": self.interval, "config": self.config}

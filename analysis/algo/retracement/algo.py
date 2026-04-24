@@ -2,7 +2,7 @@
 
 所有函数不依赖 app/hub，可在 notebook / 测试中直接调用。
 """
-import logging, math, time as _time
+import logging, math
 from typing import Dict, List, Literal, Tuple
 import pandas as pd
 from .config import RetracementConfig, DEFAULT_RATIOS
@@ -192,19 +192,87 @@ def extract_trend_legs(feature_df: pd.DataFrame, clusters_high_df: pd.DataFrame,
     return legs
 
 
-def score_and_rank(legs: List[TrendLeg], top_n: int = 6) -> List[TrendLeg]:
+def score_and_rank(legs: List[TrendLeg], top_n: int = 6, total_bars: int = None) -> List[TrendLeg]:
     if not legs: return []
-    for lg in legs: lg.conf_score = lg.span_pct * lg.conf_score
-    legs.sort(key=lambda x: x.conf_score, reverse=True)
-    kept: List[TrendLeg] = []
+    
+    max_idx = max(lg.end_idx for lg in legs)
+    
     for lg in legs:
-        redundant = False
-        for k in kept:
-            if k.direction == lg.direction and k.start_idx <= lg.start_idx and k.end_idx >= lg.end_idx:
-                redundant = True; break
-        if not redundant: kept.append(lg)
-        if len(kept) >= top_n: break
-    return kept
+        # 原始分：span × conf
+        base = lg.span_pct * lg.conf_score
+        
+        # 近期衰减：腿的终点离当前越近权重越高
+        # recency = 1.0（终点就是最新bar）→ 0.0（终点在很久以前）
+        recency = lg.end_idx / max_idx if max_idx > 0 else 1.0
+        
+        # 腿的长度惩罚：太长的腿（跨度超过总数据60%）降权
+        # 鼓励选近期的中等长度腿，而不是横跨全量数据的腿
+        length_ratio = (lg.end_idx - lg.start_idx) / max_idx if max_idx > 0 else 1.0
+        length_penalty = 1.0 if length_ratio < 0.6 else (1.0 - (length_ratio - 0.6) / 0.4 * 0.7)
+        
+        lg.conf_score = base * recency * length_penalty
+    
+    legs.sort(key=lambda x: x.conf_score, reverse=True)
+    
+    # 强制多样性选腿：up 和 down 各取一半
+    kept_up, kept_down = [], []
+    quota_each = top_n // 2  # 比如 top_n=6 → 各取3条
+    
+    for lg in legs:
+        if lg.direction == "up" and len(kept_up) < quota_each:
+            # 去重：不选被更高分的up腿完全包含的腿
+            if not any(k.start_idx <= lg.start_idx and k.end_idx >= lg.end_idx 
+                      for k in kept_up):
+                kept_up.append(lg)
+        elif lg.direction == "down" and len(kept_down) < quota_each:
+            if not any(k.start_idx <= lg.start_idx and k.end_idx >= lg.end_idx 
+                      for k in kept_down):
+                kept_down.append(lg)
+        
+        if len(kept_up) >= quota_each and len(kept_down) >= quota_each:
+            break
+    
+    # up 和 down 交替排列，方便图上区分
+    result = []
+    for u, d in zip(kept_up, kept_down):
+        result.extend([u, d])
+    # 补充剩余（如果某方向不够）
+    result.extend(kept_up[len(result)//2:])
+    result.extend(kept_down[len(result)//2:])
+    
+    return result[:top_n]
+
+
+def adaptive_window_start(feature_df: pd.DataFrame, base_bars: int, min_conf: float = 0.1) -> int:
+    """从末尾回溯，若窗口边界处连续同方向拐点，延伸到第二次方向转变。"""
+    n = len(feature_df)
+    if n <= base_bars: return 0
+    naive = n - base_bars
+    if "conf_high" not in feature_df.columns: return max(0, naive)
+    ch_loc, cl_loc = feature_df.columns.get_loc("conf_high"), feature_df.columns.get_loc("conf_low")
+    changes, prev_dir = 0, None
+    for i in range(n - 1, -1, -1):
+        ch, cl = float(feature_df.iat[i, ch_loc]), float(feature_df.iat[i, cl_loc])
+        if ch < min_conf and cl < min_conf: continue
+        d = "high" if ch >= cl else "low"
+        if prev_dir is not None and d != prev_dir:
+            changes += 1
+            if changes >= 2: return min(naive, i)
+        prev_dir = d
+    return max(0, naive)
+
+
+def merge_legs_weighted(legs: List[TrendLeg]) -> TrendLeg:
+    """同方向多条趋势腿按 conf_score 加权平均为一条。"""
+    if not legs: return None
+    if len(legs) == 1: return legs[0]
+    total_w = sum(lg.conf_score for lg in legs) or 1.0
+    def wavg(attr): return sum(getattr(lg, attr) * lg.conf_score for lg in legs) / total_w
+    low, high = wavg("low"), wavg("high")
+    return TrendLeg(start_idx=int(round(wavg("start_idx"))), end_idx=int(round(wavg("end_idx"))),
+                    start_ts=int(round(wavg("start_ts"))), end_ts=int(round(wavg("end_ts"))),
+                    low=low, high=high, direction=legs[0].direction,
+                    span_pct=(high - low) / low if low > 0 else 0, conf_score=total_w)
 
 
 def compute_retracement_levels(leg: TrendLeg, ratios: Tuple[float, ...] = DEFAULT_RATIOS) -> List[Tuple[float, float]]:
@@ -226,6 +294,11 @@ def fit_fib_groups(legs: List[TrendLeg], ratios: Tuple[float, ...] = DEFAULT_RAT
 # ═══════════════════════════════════════════════════
 
 def compute_retracement(klines: List[dict], cfg: RetracementConfig = None) -> dict:
+    """多步长趋势腿提取 → 加权合并 → Fib 回撤。
+
+    每步(×1,×2,×3)独立：自适应窗口 → 选腿(top_n/2 up + top_n/2 down)
+    → 同方向加权合并为一条 → 拟合 Fib。每步最多 2 组(1 up + 1 down)。
+    """
     cfg = cfg or RetracementConfig()
     feature_df = base_df(klines)
     feature_df, w1 = tag_pivots(feature_df, cfg.pivot_windows)
@@ -235,34 +308,36 @@ def compute_retracement(klines: List[dict], cfg: RetracementConfig = None) -> di
     feature_df = compute_confidence(feature_df, wmap, cfg.weights)
     clusters_high_df = cluster_prices(feature_df, "high", cfg.cluster_tolerance_pct, cfg.min_cluster_conf)
     clusters_low_df = cluster_prices(feature_df, "low", cfg.cluster_tolerance_pct, cfg.min_cluster_conf)
-    legs = extract_trend_legs(feature_df, clusters_high_df, clusters_low_df, min_span_pct=cfg.min_leg_span_pct)
-    ranked = score_and_rank(legs, top_n=cfg.top_n)
-    groups = fit_fib_groups(ranked, ratios=cfg.std_ratios)
-    return {"feature_df": feature_df, "clusters_high_df": clusters_high_df, "clusters_low_df": clusters_low_df,
-            "wmap": wmap, "groups": groups, "legs_found": len(legs), "legs_kept": len(ranked)}
 
+    n = len(feature_df)
+    effective_end = max(0, n - cfg.skip_recent)
+    effective_df = feature_df.iloc[:effective_end]
+    log.debug(f'skip_recent={cfg.skip_recent} n={n} effective_end={effective_end}')
 
-# ═══════════════════════════════════════════════════
-#  碰撞检测 / 突破检测 纯函数
-# ═══════════════════════════════════════════════════
+    all_groups, step_results = [], []
+    for mult in (1, 2, 3):
+        target_bars = cfg.recent_bars * mult
+        actual_start = adaptive_window_start(effective_df, target_bars, min_conf=cfg.min_cluster_conf)
+        recent_df = effective_df.iloc[actual_start:].reset_index(drop=True)
+        legs = extract_trend_legs(recent_df, clusters_high_df, clusters_low_df, min_span_pct=cfg.min_leg_span_pct)
+        ranked = score_and_rank(legs, top_n=cfg.top_n, total_bars=len(recent_df))
+        up_legs = [lg for lg in ranked if lg.direction == "up"]
+        down_legs = [lg for lg in ranked if lg.direction == "down"]
+        merged = []
+        if up_legs: merged.append(merge_legs_weighted(up_legs))
+        if down_legs: merged.append(merge_legs_weighted(down_legs))
+        groups = fit_fib_groups(merged, ratios=cfg.std_ratios)
+        all_groups.extend(groups)
+        step_results.append({"multiplier": mult, "target_bars": target_bars,
+                             "actual_start": actual_start, "effective_end": effective_end,
+                             "actual_bars": len(recent_df), "groups": groups,
+                             "raw_legs": len(legs), "ranked_legs": len(ranked),
+                             "up_merged": len(up_legs), "down_merged": len(down_legs)})
+        log.debug(f'step×{mult}: target={target_bars} actual={len(recent_df)} legs={len(legs)} '
+                  f'ranked={len(ranked)} up={len(up_legs)} down={len(down_legs)} groups={len(groups)}')
 
-def check_touch_with_cooldown(price: float, levels: List[Tuple[float, float, str, float]],
-                               tolerance: float, cooldown_sec: float,
-                               touch_last: Dict[tuple, float], key_prefix: tuple) -> List[Tuple[float, float]]:
-    """tolerance 过滤 + cooldown 去重，就地更新 touch_last。"""
-    now = _time.time()
-    out = []
-    for r, p, _d, _s in levels:
-        if abs(price - p) > tolerance: continue
-        key = (*key_prefix, r, p)
-        if now - touch_last.get(key, 0) >= cooldown_sec:
-            out.append((r, p)); touch_last[key] = now
-    return out
-
-
-def check_breakout(close: float, groups: List[FibGroup], tolerance: float = 0.0) -> List[Tuple[int, str, str]]:
-    broken = []
-    for i, g in enumerate(groups):
-        if close > g.leg.high + tolerance: broken.append((i, g.direction, "above_high"))
-        elif close < g.leg.low - tolerance: broken.append((i, g.direction, "below_low"))
-    return broken
+    return {"feature_df": feature_df, "effective_end": effective_end,
+            "clusters_high_df": clusters_high_df, "clusters_low_df": clusters_low_df,
+            "wmap": wmap, "groups": all_groups, "steps": step_results,
+            "legs_found": sum(s["raw_legs"] for s in step_results),
+            "legs_kept": sum(s["ranked_legs"] for s in step_results)}

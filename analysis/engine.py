@@ -8,9 +8,9 @@ class AnalysisEngine(AppService):
     domain = "timing"
     alias = "AnalysisEngine"
 
-    def __init__(self, config: RetracementConfig = None, data_path: str = "", **kwargs):
+    def __init__(self, config: RetracementConfig = None, clock=None, data_engine=None, **kwargs):
         super().__init__(**kwargs)
-        self.retracement = RetracementService(config=config or RetracementConfig(), data_path=data_path)
+        self.retracement = RetracementService(config=config or RetracementConfig(), clock=clock, data_engine=data_engine)
         self.add_dependency(self.retracement)
 
     @property
