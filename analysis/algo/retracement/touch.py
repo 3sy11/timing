@@ -13,6 +13,7 @@
 import logging
 from typing import Dict, List, Tuple
 import pandas as pd
+from . import config
 from .models import FibGroup
 
 log = logging.getLogger(__name__)
@@ -131,26 +132,26 @@ def volume_confirmation(df: pd.DataFrame, bar_idx: int, lookback: int = 20,
 
 def score_bar_signals(close: float, bar: dict, closes: List[float],
                       df: pd.DataFrame, groups: List[FibGroup], bar_idx: int,
-                      touch_history: Dict[Tuple, int], cfg) -> List[dict]:
+                      touch_history: Dict[Tuple, int]) -> List[dict]:
     """对单根 bar 的所有命中 level 做多维评分，返回 signal 列表。"""
-    consensus = compute_consensus_strength(close, groups, cfg.touch_tolerance)
+    consensus = compute_consensus_strength(close, groups, config.TOUCH_TOLERANCE)
     if consensus["strength"] == 0: return []
     ts_loc = df.columns.get_loc("ts")
     signals = []
     for hit in consensus["hits"]:
         gi, ratio, lp = hit["group_idx"], hit["ratio"], hit["level_price"]
         key = (gi, ratio)
-        if bar_idx - touch_history.get(key, -999) < cfg.cooldown_bars: continue
-        approach = detect_approach_direction(closes, lp, cfg.approach_lookback)
-        history = evaluate_level_history(df, lp, cfg.touch_tolerance, bar_idx, cfg.history_lookback_bars)
+        if bar_idx - touch_history.get(key, -999) < config.TOUCH_COOLDOWN_BARS: continue
+        approach = detect_approach_direction(closes, lp, config.TOUCH_APPROACH_LOOKBACK)
+        history = evaluate_level_history(df, lp, config.TOUCH_TOLERANCE, bar_idx, config.TOUCH_HISTORY_LOOKBACK_BARS)
         candle = detect_candle_pattern(bar, lp)
-        volume = volume_confirmation(df, bar_idx, cfg.volume_lookback, cfg.volume_threshold)
-        score = (consensus["groups_hit"] * cfg.w_consensus +
-                 history["bounce_rate"] * cfg.w_bounce_rate +
-                 history["touch_count"] * cfg.w_touch_count +
-                 (1.0 if volume["is_high_volume"] else 0) * cfg.w_volume +
-                 (1.0 if approach["counter_trend"] else 0) * cfg.w_counter_trend +
-                 (0.5 if any(p in candle["patterns"] for p in ("hammer", "shooting_star")) else 0) * cfg.w_candle)
+        volume = volume_confirmation(df, bar_idx, config.TOUCH_VOLUME_LOOKBACK, config.TOUCH_VOLUME_THRESHOLD)
+        score = (consensus["groups_hit"] * config.TOUCH_W_CONSENSUS +
+                 history["bounce_rate"] * config.TOUCH_W_BOUNCE_RATE +
+                 history["touch_count"] * config.TOUCH_W_TOUCH_COUNT +
+                 (1.0 if volume["is_high_volume"] else 0) * config.TOUCH_W_VOLUME +
+                 (1.0 if approach["counter_trend"] else 0) * config.TOUCH_W_COUNTER_TREND +
+                 (0.5 if any(p in candle["patterns"] for p in ("hammer", "shooting_star")) else 0) * config.TOUCH_W_CANDLE)
         touch_history[key] = bar_idx
         signals.append({
             "bar_idx": bar_idx, "ts": int(df.iat[bar_idx, ts_loc]), "close": close,
@@ -185,20 +186,18 @@ def check_breakout(close: float, groups: List[FibGroup], tolerance: float = 0.0)
 #  编排纯函数（notebook / 测试直接调用）
 # ═══════════════════════════════════════════════════
 
-def compute_touch_signals(klines: List[dict], groups: List[FibGroup], cfg=None) -> dict:
+def compute_touch_signals(klines: List[dict], groups: List[FibGroup]) -> dict:
     """扫描 K 线，对每个触线位做多维信号评分 + 突破检测。
-
-    输入：K 线 + FibGroups（来自 compute_retracement） + TouchConfig。
+    参数全部从 config 模块读取。
+    输入：K 线 + FibGroups（来自 compute_retracement）。
     输出：signals 列表、breakouts 列表、汇总统计。
     """
-    from .config import TouchConfig
     from .algo import base_df
-    cfg = cfg or TouchConfig()
     df = base_df(klines)
     n = len(df)
     if n == 0 or not groups:
         return {"signals": [], "breakouts": [], "summary": _empty_summary()}
-    start = max(0, n - cfg.scan_bars) if cfg.scan_bars > 0 else 0
+    start = max(0, n - config.TOUCH_SCAN_BARS) if config.TOUCH_SCAN_BARS > 0 else 0
     closes_list = df["close"].tolist()
     all_signals, all_breakouts = [], []
     touch_history: Dict[Tuple, int] = {}
@@ -208,15 +207,15 @@ def compute_touch_signals(klines: List[dict], groups: List[FibGroup], cfg=None) 
     for i in range(start, n):
         close_i = closes_list[i]
         bar = {c: df.iat[i, col_locs[c]] for c in cols}
-        sigs = score_bar_signals(close_i, bar, closes_list[:i + 1], df, groups, i, touch_history, cfg)
+        sigs = score_bar_signals(close_i, bar, closes_list[:i + 1], df, groups, i, touch_history)
         all_signals.extend(sigs)
-        broken = check_breakout(close_i, groups, cfg.breakout_tolerance)
+        broken = check_breakout(close_i, groups, config.TOUCH_BREAKOUT_TOLERANCE)
         for b in broken:
             b.update({"bar_idx": i, "ts": int(df.iat[i, ts_loc]), "close": close_i})
         all_breakouts.extend(broken)
-    strong = sum(1 for s in all_signals if s["score"] >= cfg.strong_threshold)
-    medium = sum(1 for s in all_signals if cfg.medium_threshold <= s["score"] < cfg.strong_threshold)
-    weak = sum(1 for s in all_signals if cfg.weak_threshold <= s["score"] < cfg.medium_threshold)
+    strong = sum(1 for s in all_signals if s["score"] >= config.TOUCH_STRONG_THRESHOLD)
+    medium = sum(1 for s in all_signals if config.TOUCH_MEDIUM_THRESHOLD <= s["score"] < config.TOUCH_STRONG_THRESHOLD)
+    weak = sum(1 for s in all_signals if config.TOUCH_WEAK_THRESHOLD <= s["score"] < config.TOUCH_MEDIUM_THRESHOLD)
     log.info(f'touch scan: bars={n - start} signals={len(all_signals)} strong={strong} medium={medium} weak={weak} breakouts={len(all_breakouts)}')
     return {"signals": all_signals, "breakouts": all_breakouts,
             "summary": {"total_touches": len(all_signals), "strong_signals": strong,

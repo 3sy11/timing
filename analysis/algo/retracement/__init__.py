@@ -1,4 +1,4 @@
-from .config import RetracementConfig, TouchConfig, DEFAULT_RATIOS
+from . import config
 from .models import TrendLeg, FibGroup, FibLevelTouched, FibInvalidated
 from .service import RetracementService
 from .command import OnBarReceived

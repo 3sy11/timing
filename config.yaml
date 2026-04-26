@@ -4,6 +4,5 @@ timing:
   clock: !module timing.common.clock.LiveClock
 
 backtest:
-  app: !module timing.engine.backtest.BacktestApp
+  app: !module timing.engine.app.BacktestApp
   clock: !module timing.common.clock.SimulatedClock
-  analysis_dir: cache/backtest/

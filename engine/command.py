@@ -1,20 +1,22 @@
-"""RunBacktest — 简化版回测命令，直接使用 BacktestApp 的服务树。"""
+"""RunBacktest — analysis.restart() 生命周期驱动 + hub.execute(PushBars) 同步回放。"""
 import logging
-from typing import Any, ClassVar
-from bollydog.globals import app
+from typing import Any, ClassVar, Dict, List, Optional
+from pydantic import Field
+from bollydog.globals import app, hub
 from bollydog.models.base import BaseCommand
-from timing.engine.evaluate import build_report
+from timing.data.models import PushBars
 
 log = logging.getLogger(__name__)
 
 
 class RunBacktest(BaseCommand):
-    """restart 分析服务 → 全量计算 → 逐 bar on_bar → 评估报告。"""
+    """restart AnalysisEngine → apply_config → warmup → 逐 bar dispatch PushBars(replay)。"""
     destination: ClassVar[str] = "backtest.BacktestApp.RunBacktest"
     symbol: str = ""
     interval: str = ""
     warmup_bars: int = 200
-    recompute_interval: int = 50
+    services: Optional[List[str]] = None
+    config: Dict[str, Any] = Field(default_factory=dict)
 
     async def __call__(self, *args, **kwargs) -> Any:
         bt_app = app
@@ -22,33 +24,28 @@ class RunBacktest(BaseCommand):
         n = len(klines)
         if n <= self.warmup_bars:
             log.warning(f'[Backtest] klines({n}) <= warmup_bars({self.warmup_bars})'); return None
-        svc = bt_app.analysis.retracement
-        await svc.restart()
-        overrides = bt_app.data.get_symbol_config(self.symbol, self.interval) or {}
-        if overrides: svc.config = svc.config.merge(overrides)
-        from timing.analysis.algo.retracement.algo import compute_retracement
-        result = compute_retracement(klines[:self.warmup_bars], svc.config)
-        await svc.set_cache(self.symbol, self.interval, result)
-        log.info(f'[Backtest] start {self.symbol}/{self.interval} klines={n} warmup={self.warmup_bars} groups={len(result.get("groups", []))}')
-        all_signals, all_breakouts = [], []
-        bars_since_recompute = 0
+        analysis = bt_app.analysis
+        # restart()：stop() → service_reset() → on_restart() → start()。
+        await analysis.restart()
+        if self.config: analysis.apply_config(self.config)
+        overrides = await analysis.get_symbol_overrides(self.symbol, self.interval)
+        if overrides: analysis.apply_config(overrides)
+        await analysis.warmup(self.symbol, self.interval, klines[:self.warmup_bars], self.services)
+        log.info(f'[Backtest] start {self.symbol}/{self.interval} klines={n} warmup={self.warmup_bars}')
+        all_results = []
+        topic = PushBars.destination
         for i in range(self.warmup_bars, n):
-            bar = klines[i]
-            bt_app.clock.set_time_ms(int(bar["ts"]))
-            r = await svc.on_bar(self.symbol, self.interval, bar)
-            for sig in r["signals"]:
-                sig.update({"bar_idx": i, "ts": int(bar["ts"])})
-                all_signals.append(sig)
-            for brk in r["breakouts"]:
-                brk.update({"bar_idx": i, "ts": int(bar["ts"]), "close": float(bar["close"])})
-                all_breakouts.append(brk)
-            if r.get("recomputed"): bars_since_recompute = 0
-            else: bars_since_recompute += 1
-            if self.recompute_interval > 0 and bars_since_recompute >= self.recompute_interval:
-                res = compute_retracement(klines[:i + 1], svc.config)
-                await svc.set_cache(self.symbol, self.interval, res)
-                bars_since_recompute = 0
-        report = build_report(klines, all_signals, all_breakouts, self.warmup_bars, bt_app.analysis_dir)
-        bt_app.set_result(self.symbol, self.interval, report)
-        log.info(f'[Backtest] done {self.symbol}/{self.interval} signals={len(all_signals)} breakouts={len(all_breakouts)} hit_rate={report["metrics"].get("hit_rate", 0)}')
-        return report
+            bt_app.clock.set_time_ms(int(klines[i]["ts"]))
+            push = PushBars(symbol=self.symbol, interval=self.interval, bars=[klines[i]], replay=True)
+            await hub.execute(push)
+            for handler_cls in hub.exchange.match(topic):
+                cmd = handler_cls()
+                cmd.add_event(push)
+                await hub.execute(cmd)
+                r = cmd.state.result() if cmd.state.done() else {}
+                if r and (r.get("touched") or r.get("broken")):
+                    all_results.append({"bar_idx": i, "ts": int(klines[i]["ts"]), **r})
+        log.info(f'[Backtest] done {self.symbol}/{self.interval} bars={n - self.warmup_bars} signals={len(all_results)}')
+        return {"symbol": self.symbol, "interval": self.interval,
+                "results": all_results, "klines_total": n,
+                "warmup_bars": self.warmup_bars, "test_bars": n - self.warmup_bars}
