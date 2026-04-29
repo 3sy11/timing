@@ -1,0 +1,68 @@
+# ══════════════════════════════════════════════════════════════
+#  timing 启动配置  —  bollydog service --config config.toml
+#
+#  每个顶层 key 是 AppService 子类的完整导入路径，
+#  bollydog CLI 通过 smart_import(key) 加载类并调用 create_from(**conf)。
+#
+#  create_from 会弹出保留字段 (commands / router_mapping / subscriber / protocol)，
+#  其余 kwargs 透传到 cls.__init__。
+#  protocol 表声明多层协议链：嵌套 protocol.protocol 递归构建。
+# ══════════════════════════════════════════════════════════════
+
+
+# ── 生产应用 ─────────────────────────────────────────────────
+["timing.engine.app.TimingApp"]
+data_dir = "cache/"
+
+
+# ── 回测应用（按需取消注释）─────────────────────────────────
+# ["timing.engine.app.BacktestApp"]
+# data_dir = "cache/backtest/"
+
+
+# ══════════════════════════════════════════════════════════════
+#  以下为独立部署各子服务的 TOML 示例（与上方互斥，按需选用）
+#  每个 AppService 子类都可以作为顶层入口独立启动，
+#  通过 protocol 表注入多层协议链，覆盖 on_init_dependencies 默认值。
+# ══════════════════════════════════════════════════════════════
+
+
+# ── DataEngine 独立部署示例 ──────────────────────────────────
+# ["timing.data.engine.DataEngine"]
+# db_path = "cache/data.duckdb"
+# commands = ["models"]
+#
+# ["timing.data.engine.DataEngine".protocol]
+# module = "bollydog.adapters.composite.TableCacheLayer"
+# table = "klines"
+# key_columns = ["symbol", "interval"]
+# value_columns = ["open", "high", "low", "close", "volume", "ts"]
+# sort_by = "ts"
+# flush_threshold = 1
+# ddl = "CREATE TABLE IF NOT EXISTS klines (\"symbol\" VARCHAR, \"interval\" VARCHAR, \"open\" DOUBLE, \"high\" DOUBLE, \"low\" DOUBLE, \"close\" DOUBLE, \"volume\" DOUBLE, \"ts\" BIGINT)"
+#
+# ["timing.data.engine.DataEngine".protocol.protocol]
+# module = "bollydog.adapters.sqlalchemy.DuckDBProtocol"
+# url = "cache/data.duckdb"
+
+
+# ── AnalysisEngine 独立部署示例 ──────────────────────────────
+# ["timing.analysis.engine.AnalysisEngine"]
+# cache_path = "cache/analysis"
+#
+# ["timing.analysis.engine.AnalysisEngine".protocol]
+# module = "bollydog.adapters.file.TOMLFileProtocol"
+# path = "cache/analysis/config.toml"
+
+
+# ── RetracementService 独立部署示例 ──────────────────────────
+# ["timing.analysis.algo.retracement.service.RetracementService"]
+# cache_path = "cache/analysis"
+#
+# ["timing.analysis.algo.retracement.service.RetracementService".protocol]
+# module = "bollydog.adapters.composite.CacheLayer"
+# flush_threshold = 1
+#
+# ["timing.analysis.algo.retracement.service.RetracementService".protocol.protocol]
+# module = "bollydog.adapters.memory.SQLiteProtocol"
+# path = "cache/analysis/retracement.sqlite"

@@ -53,8 +53,11 @@ class ComputeRetracement(BaseCommand):
             klines = svc.data_engine.get_klines(self.symbol, self.interval)
         if not klines:
             log.warning(f'[Retracement] ComputeRetracement: no klines for {self.symbol}/{self.interval}'); return None
+        overrides = svc.data_engine.get_symbol_config(self.symbol, self.interval) if svc.data_engine and hasattr(svc.data_engine, 'get_symbol_config') else {}
+        cfg = svc.config
+        if overrides: cfg.apply_overrides(overrides)
         from .algo import compute_retracement
-        result = compute_retracement(klines)
+        result = compute_retracement(klines, cfg)
         await svc.set_cache(self.symbol, self.interval, result)
         groups = result.get("groups", [])
         log.info(f'[Retracement] ComputeRetracement {self.symbol}/{self.interval} klines={len(klines)} groups={len(groups)}')

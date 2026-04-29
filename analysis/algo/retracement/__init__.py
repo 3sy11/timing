@@ -1,4 +1,4 @@
-from . import config
+from .config import RetracementConfig
 from .models import TrendLeg, FibGroup, FibLevelTouched, FibInvalidated
 from .service import RetracementService
 from .command import OnBarReceived

@@ -1,11 +1,11 @@
-"""Retracement 纯函数：swing 拐点识别 → 聚类 → 趋势腿提取 → Fib 回撤 → 碰撞/突破检测。
+"""Retracement 纯函数：swing 拐点识别 → 聚类 → 趋势腿提取 → Fib 回撤。
 
 所有函数不依赖 app/hub，可在 notebook / 测试中直接调用。
 """
 import logging, math
 from typing import Dict, List, Literal, Tuple
 import pandas as pd
-from . import config
+from .config import RetracementConfig
 from .models import TrendLeg, FibGroup
 
 log = logging.getLogger(__name__)
@@ -194,57 +194,32 @@ def extract_trend_legs(feature_df: pd.DataFrame, clusters_high_df: pd.DataFrame,
 
 def score_and_rank(legs: List[TrendLeg], top_n: int = 6, total_bars: int = None) -> List[TrendLeg]:
     if not legs: return []
-    
     max_idx = max(lg.end_idx for lg in legs)
-    
     for lg in legs:
-        # 原始分：span × conf
         base = lg.span_pct * lg.conf_score
-        
-        # 近期衰减：腿的终点离当前越近权重越高
-        # recency = 1.0（终点就是最新bar）→ 0.0（终点在很久以前）
         recency = lg.end_idx / max_idx if max_idx > 0 else 1.0
-        
-        # 腿的长度惩罚：太长的腿（跨度超过总数据60%）降权
-        # 鼓励选近期的中等长度腿，而不是横跨全量数据的腿
         length_ratio = (lg.end_idx - lg.start_idx) / max_idx if max_idx > 0 else 1.0
         length_penalty = 1.0 if length_ratio < 0.6 else (1.0 - (length_ratio - 0.6) / 0.4 * 0.7)
-        
         lg.conf_score = base * recency * length_penalty
-    
     legs.sort(key=lambda x: x.conf_score, reverse=True)
-    
-    # 强制多样性选腿：up 和 down 各取一半
     kept_up, kept_down = [], []
-    quota_each = top_n // 2  # 比如 top_n=6 → 各取3条
-    
+    quota_each = top_n // 2
     for lg in legs:
         if lg.direction == "up" and len(kept_up) < quota_each:
-            # 去重：不选被更高分的up腿完全包含的腿
-            if not any(k.start_idx <= lg.start_idx and k.end_idx >= lg.end_idx 
-                      for k in kept_up):
+            if not any(k.start_idx <= lg.start_idx and k.end_idx >= lg.end_idx for k in kept_up):
                 kept_up.append(lg)
         elif lg.direction == "down" and len(kept_down) < quota_each:
-            if not any(k.start_idx <= lg.start_idx and k.end_idx >= lg.end_idx 
-                      for k in kept_down):
+            if not any(k.start_idx <= lg.start_idx and k.end_idx >= lg.end_idx for k in kept_down):
                 kept_down.append(lg)
-        
-        if len(kept_up) >= quota_each and len(kept_down) >= quota_each:
-            break
-    
-    # up 和 down 交替排列，方便图上区分
+        if len(kept_up) >= quota_each and len(kept_down) >= quota_each: break
     result = []
-    for u, d in zip(kept_up, kept_down):
-        result.extend([u, d])
-    # 补充剩余（如果某方向不够）
+    for u, d in zip(kept_up, kept_down): result.extend([u, d])
     result.extend(kept_up[len(result)//2:])
     result.extend(kept_down[len(result)//2:])
-    
     return result[:top_n]
 
 
 def adaptive_window_start(feature_df: pd.DataFrame, base_bars: int, min_conf: float = 0.1) -> int:
-    """从末尾回溯，若窗口边界处连续同方向拐点，延伸到第二次方向转变。"""
     n = len(feature_df)
     if n <= base_bars: return 0
     naive = n - base_bars
@@ -263,7 +238,6 @@ def adaptive_window_start(feature_df: pd.DataFrame, base_bars: int, min_conf: fl
 
 
 def merge_legs_weighted(legs: List[TrendLeg]) -> TrendLeg:
-    """同方向多条趋势腿按 conf_score 加权平均为一条。"""
     if not legs: return None
     if len(legs) == 1: return legs[0]
     total_w = sum(lg.conf_score for lg in legs) or 1.0
@@ -275,15 +249,15 @@ def merge_legs_weighted(legs: List[TrendLeg]) -> TrendLeg:
                     span_pct=(high - low) / low if low > 0 else 0, conf_score=total_w)
 
 
-def compute_retracement_levels(leg: TrendLeg, ratios: Tuple[float, ...] = None) -> List[Tuple[float, float]]:
-    ratios = ratios or config.ALGO_STD_RATIOS
+def compute_retracement_levels(leg: TrendLeg, ratios=None) -> List[Tuple[float, float]]:
+    ratios = ratios or [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
     span = leg.high - leg.low
     if leg.direction == "up": return [(r, leg.high - span * r) for r in ratios]
     return [(r, leg.low + span * r) for r in ratios]
 
 
-def fit_fib_groups(legs: List[TrendLeg], ratios: Tuple[float, ...] = None) -> List[FibGroup]:
-    ratios = ratios or config.ALGO_STD_RATIOS
+def fit_fib_groups(legs: List[TrendLeg], ratios=None) -> List[FibGroup]:
+    ratios = ratios or [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
     return [FibGroup(leg=lg, levels=compute_retracement_levels(lg, ratios), score=lg.conf_score, direction=lg.direction) for lg in legs]
 
 
@@ -291,37 +265,34 @@ def fit_fib_groups(legs: List[TrendLeg], ratios: Tuple[float, ...] = None) -> Li
 #  编排纯函数（notebook / 测试直接调用）
 # ═══════════════════════════════════════════════════
 
-def compute_retracement(klines: List[dict]) -> dict:
-    """多步长趋势腿提取 → 加权合并 → Fib 回撤。
-    参数全部从 config 模块读取。
-    每步(×1,×2,×3)独立：自适应窗口 → 选腿(top_n/2 up + top_n/2 down)
-    → 同方向加权合并为一条 → 拟合 Fib。每步最多 2 组(1 up + 1 down)。
-    """
+def compute_retracement(klines: List[dict], cfg: RetracementConfig = None) -> dict:
+    """多步长趋势腿提取 → 加权合并 → Fib 回撤。"""
+    cfg = cfg or RetracementConfig()
     feature_df = base_df(klines)
-    feature_df, w1 = tag_pivots(feature_df, config.ALGO_PIVOT_WINDOWS)
-    feature_df, w2 = tag_zigzag(feature_df, config.ALGO_ZIGZAG_THRESHOLDS)
-    feature_df, w3 = tag_regression(feature_df, config.ALGO_REGRESSION_WINDOWS)
+    feature_df, w1 = tag_pivots(feature_df, cfg.pivot_windows)
+    feature_df, w2 = tag_zigzag(feature_df, cfg.zigzag_thresholds)
+    feature_df, w3 = tag_regression(feature_df, cfg.regression_windows)
     wmap = {**w1, **w2, **w3}
-    feature_df = compute_confidence(feature_df, wmap, config.ALGO_WEIGHTS)
-    clusters_high_df = cluster_prices(feature_df, "high", config.ALGO_CLUSTER_TOLERANCE_PCT, config.ALGO_MIN_CLUSTER_CONF)
-    clusters_low_df = cluster_prices(feature_df, "low", config.ALGO_CLUSTER_TOLERANCE_PCT, config.ALGO_MIN_CLUSTER_CONF)
+    feature_df = compute_confidence(feature_df, wmap, cfg.weights)
+    clusters_high_df = cluster_prices(feature_df, "high", cfg.cluster_tolerance_pct, cfg.min_cluster_conf)
+    clusters_low_df = cluster_prices(feature_df, "low", cfg.cluster_tolerance_pct, cfg.min_cluster_conf)
     n = len(feature_df)
-    effective_end = max(0, n - config.ALGO_SKIP_RECENT)
+    effective_end = max(0, n - cfg.skip_recent)
     effective_df = feature_df.iloc[:effective_end]
-    log.debug(f'skip_recent={config.ALGO_SKIP_RECENT} n={n} effective_end={effective_end}')
+    log.debug(f'skip_recent={cfg.skip_recent} n={n} effective_end={effective_end}')
     all_groups, step_results = [], []
     for mult in (1, 2, 3):
-        target_bars = config.ALGO_RECENT_BARS * mult
-        actual_start = adaptive_window_start(effective_df, target_bars, min_conf=config.ALGO_MIN_CLUSTER_CONF)
+        target_bars = cfg.recent_bars * mult
+        actual_start = adaptive_window_start(effective_df, target_bars, min_conf=cfg.min_cluster_conf)
         recent_df = effective_df.iloc[actual_start:].reset_index(drop=True)
-        legs = extract_trend_legs(recent_df, clusters_high_df, clusters_low_df, min_span_pct=config.ALGO_MIN_LEG_SPAN_PCT)
-        ranked = score_and_rank(legs, top_n=config.ALGO_TOP_N, total_bars=len(recent_df))
+        legs = extract_trend_legs(recent_df, clusters_high_df, clusters_low_df, min_span_pct=cfg.min_leg_span_pct)
+        ranked = score_and_rank(legs, top_n=cfg.top_n, total_bars=len(recent_df))
         up_legs = [lg for lg in ranked if lg.direction == "up"]
         down_legs = [lg for lg in ranked if lg.direction == "down"]
         merged = []
         if up_legs: merged.append(merge_legs_weighted(up_legs))
         if down_legs: merged.append(merge_legs_weighted(down_legs))
-        groups = fit_fib_groups(merged, ratios=config.ALGO_STD_RATIOS)
+        groups = fit_fib_groups(merged, ratios=cfg.std_ratios)
         all_groups.extend(groups)
         step_results.append({"multiplier": mult, "target_bars": target_bars,
                              "actual_start": actual_start, "effective_end": effective_end,

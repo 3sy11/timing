@@ -1,14 +1,20 @@
 """RetracementService — CacheLayer(SQLiteProtocol) 复合协议。
-内存快读 + SQLite 落盘。存储 JSON 可序列化数据，service 层做 ser/deser 边界。
+
+协议链来源（二选一，互斥）：
+  1. TOML create_from → _build_protocol → add_dependency 注入
+  2. on_init_dependencies 创建默认链（CacheLayer → SQLiteProtocol）
+
+生命周期：
+  on_init_dependencies: 按需创建默认协议链
+  on_start:   清空内存态 + _load_commands
+  on_started: 从协议恢复持久化数据（children 已就绪）
 """
 import os, logging, math
 from dataclasses import asdict
 from typing import Dict, Optional
 import pandas as pd
-from bollydog.adapters.composite import CacheLayer
-from bollydog.adapters.memory import SQLiteProtocol
 from bollydog.models.service import AppService
-from . import config
+from .config import RetracementConfig
 from .command import OnBarReceived, ComputeRetracement
 from .models import TrendLeg, FibGroup
 
@@ -19,7 +25,6 @@ _PASS_KEYS = ("wmap", "legs_found", "legs_kept")
 
 
 def _df_records(df, cols=None):
-    """DataFrame → list[dict]，NaN → None。"""
     if df is None or df.empty: return []
     recs = (df[cols] if cols else df).to_dict("records")
     return [{k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in r.items()} for r in recs]
@@ -52,32 +57,43 @@ class RetracementService(AppService):
     router_mapping = {"ComputeRetracement": ["POST", "/api/timing/compute_retracement"]}
     subscriber = {"timing.DataEngine.PushBars": OnBarReceived}
 
-    def __init__(self, clock=None, data_engine=None, cache_path="cache/analysis", **kwargs):
-        self.config = config
+    def __init__(self, config: RetracementConfig = None, clock=None, data_engine=None, cache_path="cache/analysis", **kwargs):
+        self.config = config or RetracementConfig()
         self.clock = clock
         self.data_engine = data_engine
         self._cache_path = cache_path
-        db_path = os.path.join(cache_path, "retracement.sqlite")
-        inner = SQLiteProtocol(path=db_path)
-        proto = CacheLayer(protocol=inner, flush_threshold=1)
-        super().__init__(protocol=proto, **kwargs)
+        super().__init__(**kwargs)
         self._live: Dict[str, dict] = {}
         self.touch_last: Dict[tuple, float] = {}
+
+    def on_init_dependencies(self):
+        if self.protocol: return []
+        from bollydog.adapters.composite import CacheLayer
+        from bollydog.adapters.memory import SQLiteProtocol
+        db_path = os.path.join(self._cache_path, "retracement.sqlite")
+        inner = SQLiteProtocol(path=db_path)
+        proto = CacheLayer(flush_threshold=1)
+        proto.add_dependency(inner)
+        log.info(f'[RetracementService] default protocol chain: SQLite({db_path}) → CacheLayer')
+        return [proto]
 
     # ═══════ 生命周期 ═══════
 
     async def on_start(self) -> None:
         self._live.clear()
         self.touch_last.clear()
+        self._load_commands(self.commands)
         await super().on_start()
+
+    async def on_started(self) -> None:
+        await super().on_started()
         restored = 0
         for key in await self.protocol.keys("retracement:*"):
             serialized = await self.protocol.get(key)
             if serialized:
                 self._live[key] = _deserialize(serialized)
                 restored += 1
-        if restored:
-            log.info(f'[Retracement] cold-start recovered {restored} entries from SQLite')
+        if restored: log.info(f'[Retracement] on_started recovered {restored} entries from SQLite')
 
     # ═══════ 缓存读写 ═══════
 
@@ -94,40 +110,32 @@ class RetracementService(AppService):
 
     # ═══════ 分析接口 ═══════
 
-    async def warmup(self, symbol: str, interval: str, klines: list):
-        """用调用方提供的 klines 计算初始 Fib 状态并写入缓存。"""
-        if not klines: return
-        from .algo import compute_retracement
-        result = compute_retracement(klines)
-        await self.set_cache(symbol, interval, result)
-        log.info(f'[Retracement] warmup {symbol}/{interval} bars={len(klines)} groups={len(result.get("groups", []))}')
-
     async def on_bar(self, symbol: str, interval: str, bar: dict) -> dict:
-        """单 bar 分析：触碰检测 + 突破判定 + 自动重算。"""
         close = float(bar.get("close", 0))
         if not close: return {"signals": [], "breakouts": [], "recomputed": False}
         from .touch import compute_consensus_strength, check_breakout
         from .algo import compute_retracement
+        cfg = self.config
         cache = self.get_cache(symbol, interval)
         groups = cache.get("groups", []) if cache else []
         now = self.clock.now_sec() if self.clock else 0
-        consensus = compute_consensus_strength(close, groups, config.TOUCH_TOLERANCE)
+        consensus = compute_consensus_strength(close, groups, cfg=cfg)
         signals = []
         for hit in consensus["hits"]:
             key = (symbol, interval, hit["ratio"], hit["level_price"])
-            if self.clock and now - self.touch_last.get(key, 0) < config.TOUCH_COOLDOWN_SEC: continue
+            if self.clock and now - self.touch_last.get(key, 0) < cfg.touch_cooldown_sec: continue
             self.touch_last[key] = now
             signals.append({"ratio": hit["ratio"], "level_price": hit["level_price"],
                             "touch_price": close, "direction": hit["direction"],
                             "group_idx": hit["group_idx"]})
-        broken = check_breakout(close, groups, config.TOUCH_BREAKOUT_TOLERANCE)
+        broken = check_breakout(close, groups, cfg=cfg)
         recomputed = False
         if broken:
             broken_idx = {b["group_idx"] for b in broken}
             if cache: cache["groups"] = [g for i, g in enumerate(groups) if i not in broken_idx]
             klines = self.data_engine.get_klines(symbol, interval) if self.data_engine else None
             if klines:
-                result = compute_retracement(klines)
+                result = compute_retracement(klines, cfg)
                 await self.set_cache(symbol, interval, result)
                 recomputed = True
             elif cache:

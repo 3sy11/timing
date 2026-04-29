@@ -1,10 +1,12 @@
-"""DataEngine：TableCacheLayer(DuckDBProtocol) — 内存快读 + DuckDB 列式落盘，冷启动自动恢复。"""
+"""DataEngine：TableCacheLayer(DuckDBProtocol) — 内存快读 + DuckDB 列式落盘。
+
+协议链来源（二选一，互斥）：
+  1. TOML create_from → _build_protocol → add_dependency 注入  （self.protocol 已设置）
+  2. on_init_dependencies 创建默认链                          （self.protocol 为 None）
+"""
 import logging
 from typing import List
-from bollydog.adapters.sqlalchemy import DuckDBProtocol
-from bollydog.adapters.composite import TableCacheLayer
 from bollydog.models.service import AppService
-from timing.models.kline import KLINE_COLUMNS, KLINE_KEY_DEFS, kline_ddl
 from timing.data.config import DataConfig
 
 log = logging.getLogger(__name__)
@@ -19,16 +21,27 @@ class DataEngine(AppService):
         "IngestKlinesFromFile": ["POST", "/api/timing/ingest_klines_from_file"],
     }
 
-    def __init__(self, config: DataConfig = None, **kwargs):
+    def __init__(self, config: DataConfig = None, db_path: str = None, **kwargs):
         cfg = config or DataConfig()
-        inner = DuckDBProtocol(url=cfg.db_path)
-        proto = TableCacheLayer(protocol=inner, table='klines',
-            key_columns=[k for k, _ in KLINE_KEY_DEFS],
-            value_columns=KLINE_COLUMNS,
+        self._db_path = db_path or cfg.db_path
+        super().__init__(**kwargs)
+
+    def on_init_dependencies(self):
+        if self.protocol: return []
+        from bollydog.adapters.sqlalchemy import DuckDBProtocol
+        from bollydog.adapters.composite import TableCacheLayer
+        from timing.models.kline import KLINE_COLUMNS, KLINE_KEY_DEFS, kline_ddl
+        inner = DuckDBProtocol(url=self._db_path)
+        proto = TableCacheLayer(table='klines',
+            key_columns=[k for k, _ in KLINE_KEY_DEFS], value_columns=KLINE_COLUMNS,
             sort_by='ts', ddl=kline_ddl(), flush_threshold=1)
-        super().__init__(protocol=proto, **kwargs)
-        self.add_dependency(proto)
-        self._inner_db = inner
+        proto.add_dependency(inner)
+        log.info(f'[DataEngine] default protocol chain: DuckDB({self._db_path}) → TableCacheLayer')
+        return [proto]
+
+    async def on_start(self) -> None:
+        self._load_commands(self.commands)
+        await super().on_start()
 
     # ═══════ klines CRUD ═══════
 
