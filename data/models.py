@@ -13,7 +13,7 @@ class PushBars(BaseCommand):
     """HTTP 推送 bars → 写入 DataEngine protocol 缓存 → _publish 广播给订阅者。
     replay=True 时跳过 append_bars，仅返回结果并触发 _publish 广播链。
     """
-    destination: ClassVar[str] = "timing.DataEngine.PushBars"
+    destination: ClassVar[str] = "data.DataEngine.PushBars"
     symbol: str = ""
     interval: str = ""
     bars: List[dict] = Field(default_factory=list)
@@ -29,7 +29,7 @@ class PushBars(BaseCommand):
 
 class IngestKlinesFromFile(BaseCommand):
     """从 parquet/csv 读入 K 线 → 写入 DataEngine protocol 缓存。"""
-    destination: ClassVar[str] = "timing.DataEngine.IngestKlinesFromFile"
+    destination: ClassVar[str] = "data.DataEngine.IngestKlinesFromFile"
     path: str = ""
     symbol: str = ""
     interval: str = ""

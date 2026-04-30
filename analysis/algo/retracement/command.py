@@ -1,44 +1,20 @@
-"""Retracement command：OnBarReceived / ComputeRetracement 薄壳委托。"""
+"""Retracement command — ComputeRetracement 薄壳委托。
+
+OnBarReceived 已移至 timing/analysis/command.py 做 fan-out。
+跨服务数据通过 AppService._apps 查找。
+"""
 import logging
 from typing import Any, ClassVar
-from bollydog.globals import app, hub
+from bollydog.globals import app
 from bollydog.models.base import BaseCommand
-from .models import FibLevelTouched, FibInvalidated
+from bollydog.models.service import AppService
 
 log = logging.getLogger(__name__)
 
 
-class OnBarReceived(BaseCommand):
-    """订阅 PushBars → 逐 bar 调用 svc.on_bar → 根据返回值发出事件。"""
-    destination: ClassVar[str] = "timing.RetracementService.OnBarReceived"
-
-    async def __call__(self, *args, **kwargs) -> Any:
-        raw = self.get_event(-1)
-        if not raw: return None
-        info = raw.get("state", [None, None])[1]
-        if not isinstance(info, dict): return None
-        symbol, interval = info.get("symbol", ""), info.get("interval", "")
-        bars = info.get("bars", [])
-        if not (symbol and bars): return None
-        svc = app
-        summary = {"touched": 0, "broken": 0, "recomputed": False}
-        for bar in bars:
-            r = await svc.on_bar(symbol, interval, bar)
-            for sig in r["signals"]:
-                await hub.emit(FibLevelTouched(symbol=symbol, ratio=sig["ratio"], level_price=sig["level_price"], touch_price=sig["touch_price"]))
-                summary["touched"] += 1
-            for b in r["breakouts"]:
-                await hub.emit(FibInvalidated(symbol=symbol, interval=interval, group_idx=b["group_idx"], direction=b["direction"], break_side=b["break_side"], close=float(bar.get("close", 0))))
-                summary["broken"] += 1
-            if r["recomputed"]: summary["recomputed"] = True
-        if summary["touched"] or summary["broken"]:
-            log.info(f'[Retracement] {symbol}/{interval} touched={summary["touched"]} broken={summary["broken"]} recomputed={summary["recomputed"]}')
-        return summary
-
-
 class ComputeRetracement(BaseCommand):
-    """compute_retracement → set_cache。klines 可外部传入，缺省从 data_engine 取。"""
-    destination: ClassVar[str] = "timing.RetracementService.ComputeRetracement"
+    """compute_retracement → set_cache。klines 可外部传入，缺省从 DataEngine 取。"""
+    destination: ClassVar[str] = "analysis.RetracementService.ComputeRetracement"
     symbol: str = ""
     interval: str = ""
     klines: list = None
@@ -48,16 +24,14 @@ class ComputeRetracement(BaseCommand):
         svc = app
         klines = self.klines
         if not klines:
-            if not svc.data_engine:
-                log.warning('[Retracement] ComputeRetracement: data_engine not set'); return None
-            klines = svc.data_engine.get_klines(self.symbol, self.interval)
+            data_engine = AppService._apps.get('data.DataEngine')
+            if not data_engine:
+                log.warning('[Retracement] ComputeRetracement: DataEngine not found'); return None
+            klines = data_engine.get_klines(self.symbol, self.interval)
         if not klines:
             log.warning(f'[Retracement] ComputeRetracement: no klines for {self.symbol}/{self.interval}'); return None
-        overrides = svc.data_engine.get_symbol_config(self.symbol, self.interval) if svc.data_engine and hasattr(svc.data_engine, 'get_symbol_config') else {}
-        cfg = svc.config
-        if overrides: cfg.apply_overrides(overrides)
         from .algo import compute_retracement
-        result = compute_retracement(klines, cfg)
+        result = compute_retracement(klines, svc.config)
         await svc.set_cache(self.symbol, self.interval, result)
         groups = result.get("groups", [])
         log.info(f'[Retracement] ComputeRetracement {self.symbol}/{self.interval} klines={len(klines)} groups={len(groups)}')

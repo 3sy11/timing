@@ -1,86 +1,46 @@
-"""AnalysisEngine — TOML 配置驱动的算法子服务容器。
+"""AnalysisEngine — 具体 Coordinator，持有唯一 subscriber 做 OnBarReceived fan-out。
 
-协议链来源（二选一，互斥）：
-  1. TOML create_from → _build_protocol → add_dependency 注入
-  2. on_init_dependencies 创建默认 TOMLFileProtocol
-
-生命周期：
-  on_init_dependencies: 按需创建默认 TOML 协议
-  on_start:   _load_commands
-  on_started: 从 TOML 读取配置覆盖子服务 Config 实例（children 已就绪）
+子服务（RetracementService 等）继承本类，实现 _warmup / on_bar。
+生产：PushBars → Exchange → OnBarReceived → fan-out _services
+回测：RunBacktest 直接遍历 _services 调 on_bar（保证 bar-by-bar 顺序）。
 """
 import os, logging
+from typing import ClassVar
+from mode.utils.imports import smart_import
 from bollydog.models.service import AppService
-from timing.analysis.algo.retracement.config import RetracementConfig
-from timing.analysis.algo.retracement.service import RetracementService
 
 log = logging.getLogger(__name__)
 
-CACHE_PATH: str = os.environ.get("TIMING_ANALYSIS_CACHE_PATH", "cache/analysis")
+CLOCK_MODULE = os.environ.get("TIMING_CLOCK", "timing.common.clock.LiveClock")
+CACHE_PATH = os.environ.get("TIMING_ANALYSIS_CACHE_PATH", "cache/analysis")
 
 
 class AnalysisEngine(AppService):
-    domain = "timing"
+    domain = "analysis"
     alias = "AnalysisEngine"
+    commands = ["timing.analysis.command"]
+    clock = smart_import(CLOCK_MODULE)()
+    _services: ClassVar[dict] = {}
+    config = None
 
-    def __init__(self, config: RetracementConfig = None, clock=None, data_engine=None, cache_path: str = None, **kwargs):
-        global CACHE_PATH
-        if cache_path: CACHE_PATH = cache_path
-        self._cache_path = CACHE_PATH
+    def __init_subclass__(cls, abstract=False, **kwargs):
+        if 'domain' not in cls.__dict__:
+            cls.domain = "analysis"
+        super().__init_subclass__(abstract=abstract, **kwargs)
+
+    def __init__(self, cache_path=None, **kwargs):
+        self._cache_path = cache_path or CACHE_PATH
         os.makedirs(self._cache_path, exist_ok=True)
-        self._sub_configs = {}
-        self._sub_services = {}
         super().__init__(**kwargs)
-        self.retracement = RetracementService(
-            config=config or RetracementConfig(), clock=clock,
-            data_engine=data_engine, cache_path=self._cache_path)
-        self.add_dependency(self.retracement)
 
-    def on_init_dependencies(self):
-        if self.protocol: return []
-        from bollydog.adapters.file import TOMLFileProtocol
-        proto = TOMLFileProtocol(path=os.path.join(self._cache_path, "config.toml"))
-        log.info(f'[AnalysisEngine] default protocol: TOMLFile({self._cache_path}/config.toml)')
-        return [proto]
-
-    def add_dependency(self, dep):
-        super().add_dependency(dep)
-        alias = getattr(dep, 'alias', None)
-        if not alias: return dep
-        cfg_inst = getattr(dep, 'config', None)
-        if cfg_inst and hasattr(cfg_inst, 'apply_overrides'):
-            self._sub_configs[alias] = cfg_inst
-        self._sub_services[alias] = dep
-        return dep
-
-    async def on_start(self) -> None:
-        self._load_commands(self.commands)
-        await super().on_start()
-
-    async def on_started(self) -> None:
+    async def on_started(self):
+        if type(self) is not AnalysisEngine:
+            AnalysisEngine._services[self.alias] = self
+            log.info(f'[AnalysisEngine] _services registered: {self.alias}')
         await super().on_started()
-        if not self.protocol: return
-        data = await self.protocol.read()
-        for key, cfg_overrides in data.items():
-            if not isinstance(cfg_overrides, dict) or key not in self._sub_configs: continue
-            applied = self._sub_configs[key].apply_overrides(cfg_overrides)
-            if applied: log.info(f'[AnalysisEngine] on_started {key} config overrides: {applied}')
 
-    # ═══════ 运行时配置合并 ═══════
+    async def _warmup(self, symbol, interval, klines):
+        raise NotImplementedError
 
-    def apply_config(self, overrides: dict):
-        for alias, cfg_overrides in overrides.items():
-            if not isinstance(cfg_overrides, dict) or alias not in self._sub_configs: continue
-            applied = self._sub_configs[alias].apply_overrides(cfg_overrides)
-            if applied: log.info(f'[AnalysisEngine] apply_config {alias}: {applied}')
-
-    # ═══════ 配置持久化读写 ═══════
-
-    async def get_symbol_overrides(self, symbol: str, interval: str) -> dict:
-        if not self.protocol: return {}
-        return await self.protocol.get(f"symbols.{symbol}:{interval}", {})
-
-    async def set_symbol_overrides(self, symbol: str, interval: str, overrides: dict):
-        if not self.protocol: return
-        await self.protocol.set(f"symbols.{symbol}:{interval}", overrides)
-        log.info(f'[AnalysisEngine] set_symbol_overrides {symbol}/{interval} keys={list(overrides.keys())}')
+    async def on_bar(self, symbol, interval, bar):
+        raise NotImplementedError

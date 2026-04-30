@@ -1,8 +1,7 @@
-"""DataEngine：TableCacheLayer(DuckDBProtocol) — 内存快读 + DuckDB 列式落盘。
+"""DataEngine — TableCacheLayer(DuckDBProtocol) 内存快读 + DuckDB 列式落盘。
 
-协议链来源（二选一，互斥）：
-  1. TOML create_from → _build_protocol → add_dependency 注入  （self.protocol 已设置）
-  2. on_init_dependencies 创建默认链                          （self.protocol 为 None）
+TOML 独立部署 / 作为子服务默认协议链均可。
+_load_commands 由 load_from_config 全局统一调用，on_start 不再重复。
 """
 import logging
 from typing import List
@@ -13,7 +12,7 @@ log = logging.getLogger(__name__)
 
 
 class DataEngine(AppService):
-    domain = "timing"
+    domain = "data"
     alias = "DataEngine"
     commands = ["models"]
     router_mapping = {
@@ -21,9 +20,8 @@ class DataEngine(AppService):
         "IngestKlinesFromFile": ["POST", "/api/timing/ingest_klines_from_file"],
     }
 
-    def __init__(self, config: DataConfig = None, db_path: str = None, **kwargs):
-        cfg = config or DataConfig()
-        self._db_path = db_path or cfg.db_path
+    def __init__(self, db_path: str = None, **kwargs):
+        self._db_path = db_path or DataConfig().db_path
         super().__init__(**kwargs)
 
     def on_init_dependencies(self):
@@ -36,14 +34,8 @@ class DataEngine(AppService):
             key_columns=[k for k, _ in KLINE_KEY_DEFS], value_columns=KLINE_COLUMNS,
             sort_by='ts', ddl=kline_ddl(), flush_threshold=1)
         proto.add_dependency(inner)
-        log.info(f'[DataEngine] default protocol chain: DuckDB({self._db_path}) → TableCacheLayer')
+        log.info(f'[DataEngine] default protocol: DuckDB({self._db_path}) → TableCacheLayer')
         return [proto]
-
-    async def on_start(self) -> None:
-        self._load_commands(self.commands)
-        await super().on_start()
-
-    # ═══════ klines CRUD ═══════
 
     def get_klines(self, symbol: str, interval: str, start_ts: int = None, end_ts: int = None) -> List[dict]:
         rows = list(self.protocol.adapter.get(f"{symbol}:{interval}", []))

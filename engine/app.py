@@ -1,18 +1,11 @@
-"""TimingApp / BacktestApp — 同级应用，各自持有独立服务树。
+"""TimingApp / BacktestApp — 同级应用，TOML depends 管理依赖。
 
-TOML 启动：
-  bollydog service --config config.toml
-
-每个子服务 (DataEngine, AnalysisEngine, RetracementService) 均可独立作为
-TOML 顶层入口配置，包括多层协议链。作为子服务时走 on_init_dependencies 默认链。
+TimingApp：生产入口，无需手动创建子服务。
+BacktestApp：on_init_dependencies 读 backtest.toml 动态创建带序号 alias 的分析子服务。
 """
-import os, logging
+import logging
 from bollydog.models.service import AppService
-from timing.common.clock import LiveClock, SimulatedClock
-from timing.data.engine import DataEngine
-from timing.data.config import DataConfig
-from timing.analysis.algo.retracement.config import RetracementConfig
-from timing.analysis.engine import AnalysisEngine
+from timing.analysis.engine import AnalysisEngine, CACHE_PATH
 
 log = logging.getLogger(__name__)
 
@@ -21,33 +14,37 @@ class TimingApp(AppService):
     domain = "timing"
     alias = "TimingApp"
     commands = []
-
-    def __init__(self, clock=None, data_dir="cache/", **kwargs):
-        super().__init__(**kwargs)
-        if clock is None: self.clock = LiveClock()
-        elif isinstance(clock, type): self.clock = clock()
-        else: self.clock = clock
-        os.makedirs(data_dir, exist_ok=True)
-        self.data = DataEngine(db_path=os.path.join(data_dir, "data.duckdb"))
-        self.analysis = AnalysisEngine(clock=self.clock, data_engine=self.data,
-                                       cache_path=os.path.join(data_dir, "analysis"))
-        self.add_dependency(self.data)
-        self.add_dependency(self.analysis)
+    analysis = AnalysisEngine
 
 
 class BacktestApp(AppService):
-    """回测基座：每次 RunBacktest 通过实例化新子服务实现隔离。"""
     domain = "backtest"
     alias = "BacktestApp"
     commands = ["timing.engine.command"]
+    analysis = AnalysisEngine
 
-    def __init__(self, clock=None, data_dir="cache/backtest/", **kwargs):
+    def __init__(self, backtest_config="backtest.toml", **kwargs):
+        self._bt_config_path = backtest_config
         super().__init__(**kwargs)
-        self.clock = clock or SimulatedClock()
-        os.makedirs(data_dir, exist_ok=True)
-        self.data = DataEngine(db_path=os.path.join(data_dir, "data.duckdb"))
-        self.analysis = AnalysisEngine(clock=self.clock, data_engine=self.data,
-                                       cache_path=os.path.join(data_dir, "analysis"))
-        self.add_dependency(self.data)
-        self.add_dependency(self.analysis)
-        log.info(f'[BacktestApp] init data_dir={data_dir}')
+
+    def on_init_dependencies(self):
+        import tomllib
+        from mode.utils.imports import smart_import
+        try:
+            with open(self._bt_config_path, 'rb') as f:
+                bt_conf = tomllib.load(f)
+        except FileNotFoundError:
+            log.warning(f'[BacktestApp] {self._bt_config_path} not found, no services created')
+            return []
+        self._bt_params = bt_conf
+        deps = []
+        for i, svc_conf in enumerate(bt_conf.get("services", [])):
+            base_cls = smart_import(svc_conf["module"])
+            alias = f'{base_cls.alias}_{i}'
+            svc_cls = type(alias, (base_cls,), {'alias': alias})
+            svc = svc_cls(cache_path=svc_conf.get("cache_path", f'{CACHE_PATH}/{alias}'))
+            if svc.config and svc_conf.get("config"):
+                svc.config.apply_overrides(svc_conf["config"])
+            deps.append(svc)
+            log.info(f'[BacktestApp] created {alias} config={svc_conf.get("config", {})}')
+        return deps

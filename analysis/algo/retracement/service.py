@@ -1,21 +1,16 @@
-"""RetracementService — CacheLayer(SQLiteProtocol) 复合协议。
+"""RetracementService — 继承 AnalysisEngine Coordinator，实现 _warmup / on_bar。
 
-协议链来源（二选一，互斥）：
-  1. TOML create_from → _build_protocol → add_dependency 注入
-  2. on_init_dependencies 创建默认链（CacheLayer → SQLiteProtocol）
-
-生命周期：
-  on_init_dependencies: 按需创建默认协议链
-  on_start:   清空内存态 + _load_commands
-  on_started: 从协议恢复持久化数据（children 已就绪）
+subscriber 由 AnalysisEngine 统一持有（fan-out），本类不再声明。
+跨服务通过 AppService._apps 查找。
 """
 import os, logging, math
 from dataclasses import asdict
 from typing import Dict, Optional
 import pandas as pd
 from bollydog.models.service import AppService
+from timing.analysis.engine import AnalysisEngine
 from .config import RetracementConfig
-from .command import OnBarReceived, ComputeRetracement
+from .command import ComputeRetracement  # noqa: F401
 from .models import TrendLeg, FibGroup
 
 log = logging.getLogger(__name__)
@@ -50,19 +45,14 @@ def _deserialize(data: dict) -> dict:
     return out
 
 
-class RetracementService(AppService):
-    domain = "timing"
+class RetracementService(AnalysisEngine):
     alias = "RetracementService"
     commands = ["timing.analysis.algo.retracement.command"]
     router_mapping = {"ComputeRetracement": ["POST", "/api/timing/compute_retracement"]}
-    subscriber = {"timing.DataEngine.PushBars": OnBarReceived}
 
-    def __init__(self, config: RetracementConfig = None, clock=None, data_engine=None, cache_path="cache/analysis", **kwargs):
-        self.config = config or RetracementConfig()
-        self.clock = clock
-        self.data_engine = data_engine
-        self._cache_path = cache_path
-        super().__init__(**kwargs)
+    def __init__(self, cache_path=None, **kwargs):
+        self.config = RetracementConfig()
+        super().__init__(cache_path=cache_path, **kwargs)
         self._live: Dict[str, dict] = {}
         self.touch_last: Dict[tuple, float] = {}
 
@@ -74,15 +64,12 @@ class RetracementService(AppService):
         inner = SQLiteProtocol(path=db_path)
         proto = CacheLayer(flush_threshold=1)
         proto.add_dependency(inner)
-        log.info(f'[RetracementService] default protocol chain: SQLite({db_path}) → CacheLayer')
+        log.info(f'[RetracementService] default protocol: SQLite({db_path}) → CacheLayer')
         return [proto]
-
-    # ═══════ 生命周期 ═══════
 
     async def on_start(self) -> None:
         self._live.clear()
         self.touch_last.clear()
-        self._load_commands(self.commands)
         await super().on_start()
 
     async def on_started(self) -> None:
@@ -93,9 +80,7 @@ class RetracementService(AppService):
             if serialized:
                 self._live[key] = _deserialize(serialized)
                 restored += 1
-        if restored: log.info(f'[Retracement] on_started recovered {restored} entries from SQLite')
-
-    # ═══════ 缓存读写 ═══════
+        if restored: log.info(f'[Retracement] on_started recovered {restored} entries')
 
     def _key(self, symbol: str, interval: str) -> str:
         return f"retracement:{symbol}:{interval}"
@@ -108,7 +93,11 @@ class RetracementService(AppService):
     def get_cache(self, symbol: str, interval: str) -> Optional[dict]:
         return self._live.get(self._key(symbol, interval))
 
-    # ═══════ 分析接口 ═══════
+    async def _warmup(self, symbol, interval, klines):
+        from .algo import compute_retracement
+        result = compute_retracement(klines, self.config)
+        await self.set_cache(symbol, interval, result)
+        log.info(f'[Retracement] _warmup {symbol}/{interval} klines={len(klines)} groups={len(result.get("groups", []))}')
 
     async def on_bar(self, symbol: str, interval: str, bar: dict) -> dict:
         close = float(bar.get("close", 0))
@@ -118,22 +107,22 @@ class RetracementService(AppService):
         cfg = self.config
         cache = self.get_cache(symbol, interval)
         groups = cache.get("groups", []) if cache else []
-        now = self.clock.now_sec() if self.clock else 0
+        now = self.clock.now_sec()
         consensus = compute_consensus_strength(close, groups, cfg=cfg)
         signals = []
         for hit in consensus["hits"]:
             key = (symbol, interval, hit["ratio"], hit["level_price"])
-            if self.clock and now - self.touch_last.get(key, 0) < cfg.touch_cooldown_sec: continue
+            if now - self.touch_last.get(key, 0) < cfg.touch_cooldown_sec: continue
             self.touch_last[key] = now
             signals.append({"ratio": hit["ratio"], "level_price": hit["level_price"],
-                            "touch_price": close, "direction": hit["direction"],
-                            "group_idx": hit["group_idx"]})
+                            "touch_price": close, "direction": hit["direction"], "group_idx": hit["group_idx"]})
         broken = check_breakout(close, groups, cfg=cfg)
         recomputed = False
         if broken:
             broken_idx = {b["group_idx"] for b in broken}
             if cache: cache["groups"] = [g for i, g in enumerate(groups) if i not in broken_idx]
-            klines = self.data_engine.get_klines(symbol, interval) if self.data_engine else None
+            data_engine = AppService._apps.get('data.DataEngine')
+            klines = data_engine.get_klines(symbol, interval) if data_engine else None
             if klines:
                 result = compute_retracement(klines, cfg)
                 await self.set_cache(symbol, interval, result)
