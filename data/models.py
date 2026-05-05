@@ -27,6 +27,18 @@ class PushBars(BaseCommand):
         return {"symbol": self.symbol, "interval": self.interval, "bars": processed}
 
 
+class GetKlines(BaseCommand):
+    """通过命令分派获取 klines，替代直接引用 DataEngine。"""
+    destination: ClassVar[str] = "data.DataEngine.GetKlines"
+    symbol: str = ""
+    interval: str = ""
+    start_ts: int = None
+    end_ts: int = None
+
+    async def __call__(self, *args, **kwargs) -> Any:
+        return app.get_klines(self.symbol, self.interval, self.start_ts, self.end_ts)
+
+
 class IngestKlinesFromFile(BaseCommand):
     """从 parquet/csv 读入 K 线 → 写入 DataEngine protocol 缓存。"""
     destination: ClassVar[str] = "data.DataEngine.IngestKlinesFromFile"

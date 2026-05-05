@@ -24,19 +24,6 @@ class DataEngine(AppService):
         self._db_path = db_path or DataConfig().db_path
         super().__init__(**kwargs)
 
-    def on_init_dependencies(self):
-        if self.protocol: return []
-        from bollydog.adapters.sqlalchemy import DuckDBProtocol
-        from bollydog.adapters.composite import TableCacheLayer
-        from timing.models.kline import KLINE_COLUMNS, KLINE_KEY_DEFS, kline_ddl
-        inner = DuckDBProtocol(url=self._db_path)
-        proto = TableCacheLayer(table='klines',
-            key_columns=[k for k, _ in KLINE_KEY_DEFS], value_columns=KLINE_COLUMNS,
-            sort_by='ts', ddl=kline_ddl(), flush_threshold=1)
-        proto.add_dependency(inner)
-        log.info(f'[DataEngine] default protocol: DuckDB({self._db_path}) → TableCacheLayer')
-        return [proto]
-
     def get_klines(self, symbol: str, interval: str, start_ts: int = None, end_ts: int = None) -> List[dict]:
         rows = list(self.protocol.adapter.get(f"{symbol}:{interval}", []))
         if start_ts is not None: rows = [x for x in rows if x["ts"] >= start_ts]

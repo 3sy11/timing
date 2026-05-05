@@ -1,12 +1,12 @@
-"""RetracementService — 继承 AnalysisEngine Coordinator，实现 _warmup / on_bar。
+"""RetracementService — 继承 AnalysisEngine，实现 _warmup / _process_bar。
 
-subscriber 由 AnalysisEngine 统一持有（fan-out），本类不再声明。
-跨服务通过 AppService._apps 查找。
+subscriber 由 AnalysisEngine 统一持有，本类不再声明。
 """
 import os, logging, math
 from dataclasses import asdict
 from typing import Dict, Optional
 import pandas as pd
+from bollydog.globals import hub
 from bollydog.models.service import AppService
 from timing.analysis.engine import AnalysisEngine
 from .config import RetracementConfig
@@ -99,7 +99,7 @@ class RetracementService(AnalysisEngine):
         await self.set_cache(symbol, interval, result)
         log.info(f'[Retracement] _warmup {symbol}/{interval} klines={len(klines)} groups={len(result.get("groups", []))}')
 
-    async def on_bar(self, symbol: str, interval: str, bar: dict) -> dict:
+    async def _process_bar(self, symbol: str, interval: str, bar: dict) -> dict:
         close = float(bar.get("close", 0))
         if not close: return {"signals": [], "breakouts": [], "recomputed": False}
         from .touch import compute_consensus_strength, check_breakout
@@ -121,8 +121,10 @@ class RetracementService(AnalysisEngine):
         if broken:
             broken_idx = {b["group_idx"] for b in broken}
             if cache: cache["groups"] = [g for i, g in enumerate(groups) if i not in broken_idx]
-            data_engine = AppService._apps.get('data.DataEngine')
-            klines = data_engine.get_klines(symbol, interval) if data_engine else None
+            from timing.data.models import GetKlines
+            get_cmd = GetKlines(symbol=symbol, interval=interval)
+            result = await hub.execute(get_cmd)
+            klines = result.state.result() if result and result.state.done() else None
             if klines:
                 result = compute_retracement(klines, cfg)
                 await self.set_cache(symbol, interval, result)

@@ -1,7 +1,6 @@
 from .config import RetracementConfig
 from .models import TrendLeg, FibGroup, FibLevelTouched, FibInvalidated
 from .service import RetracementService
-from .command import OnBarReceived
 from .algo import (compute_retracement, base_df, tag_pivots, tag_zigzag, tag_regression,
                    compute_confidence, cluster_prices, extract_trend_legs, score_and_rank, fit_fib_groups)
 from .touch import (compute_touch_signals, compute_consensus_strength, check_breakout,

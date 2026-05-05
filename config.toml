@@ -10,7 +10,7 @@
 
 # ── AnalysisEngine Coordinator（持有唯一 subscriber fan-out）──
 ["timing.analysis.engine.AnalysisEngine"]
-subscriber = {"data.DataEngine.PushBars" = "timing.analysis.command.OnBarReceived"}
+subscriber = {"data.DataEngine.PushBars" = "on_bar"}
 
 
 # ── 生产入口 ──
@@ -20,7 +20,7 @@ depends = ["data.DataEngine", "analysis.AnalysisEngine"]
 
 # ── 回测入口 ──
 ["timing.engine.app.BacktestApp"]
-depends = ["data.DataEngine"]
+depends = ["data.DataEngine", "analysis.AnalysisEngine"]
 
 
 # ── 数据层（共享）──
