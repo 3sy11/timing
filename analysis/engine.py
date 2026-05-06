@@ -42,7 +42,7 @@ class AnalysisEngine(AppService):
 
     async def on_bar(self, cmd):
         """Exchange subscriber: PushBars 事件触发。
-        检查 checkpoint → 拉取新数据 → warmup(首次) → 按序处理 bar → 更新 checkpoint。
+        检查 checkpoint → 按需拉取数据 → warmup(首次) → 按序处理 bar → 更新 checkpoint。
         """
         event = cmd.get_event(-1)
         if not event:
@@ -54,29 +54,33 @@ class AnalysisEngine(AppService):
         if not (symbol and interval):
             return None
 
-        checkpoint_ts = self._checkpoints.get((symbol, interval), 0)
-
-        # 拉取全部数据
         from bollydog.globals import hub
         from timing.data.models import GetKlines
-        get_cmd = GetKlines(symbol=symbol, interval=interval)
-        klines_result = await hub.execute(get_cmd)
-        klines = klines_result.state.result()
-        if not klines:
-            return None
 
-        # 过滤 checkpoint 之后的新 bar
-        new_bars = [b for b in klines if int(b["ts"]) > checkpoint_ts]
+        checkpoint_ts = self._checkpoints.get((symbol, interval), 0)
+
+        if checkpoint_ts == 0:
+            # 首次：拉取全量数据（warmup 需要前面的 bar）
+            get_cmd = GetKlines(symbol=symbol, interval=interval)
+            klines_result = await hub.execute(get_cmd)
+            all_klines = klines_result.state.result()
+            if not all_klines:
+                return None
+
+            warmup = getattr(self.config, 'warmup_bars', 200) if self.config else 200
+            if len(all_klines) <= warmup:
+                return None
+
+            await self._warmup(symbol, interval, all_klines[:warmup])
+            new_bars = all_klines[warmup:]
+        else:
+            # 后续：只拉取 checkpoint 之后的数据
+            get_cmd = GetKlines(symbol=symbol, interval=interval, start_ts=checkpoint_ts + 1)
+            klines_result = await hub.execute(get_cmd)
+            new_bars = klines_result.state.result()
+
         if not new_bars:
             return None
-
-        # 首次：warmup
-        if checkpoint_ts == 0:
-            warmup = getattr(self.config, 'warmup_bars', 200) if self.config else 200
-            if len(klines) <= warmup:
-                return None
-            await self._warmup(symbol, interval, klines[:warmup])
-            new_bars = [b for b in new_bars if int(b["ts"]) > int(klines[warmup - 1]["ts"])]
 
         # 按序处理
         result = {"signals": [], "breakouts": [], "recomputed": False}

@@ -34,9 +34,12 @@ class GetKlines(BaseCommand):
     interval: str = ""
     start_ts: int = None
     end_ts: int = None
+    offset: int = None
+    limit: int = None
 
     async def __call__(self, *args, **kwargs) -> Any:
-        return app.get_klines(self.symbol, self.interval, self.start_ts, self.end_ts)
+        return app.get_klines(self.symbol, self.interval, self.start_ts, self.end_ts,
+                              self.offset, self.limit)
 
 
 class IngestKlinesFromFile(BaseCommand):

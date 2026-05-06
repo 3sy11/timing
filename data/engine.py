@@ -24,10 +24,13 @@ class DataEngine(AppService):
         self._db_path = db_path or DataConfig().db_path
         super().__init__(**kwargs)
 
-    def get_klines(self, symbol: str, interval: str, start_ts: int = None, end_ts: int = None) -> List[dict]:
+    def get_klines(self, symbol: str, interval: str, start_ts: int = None, end_ts: int = None,
+                   offset: int = None, limit: int = None) -> List[dict]:
         rows = list(self.protocol.adapter.get(f"{symbol}:{interval}", []))
         if start_ts is not None: rows = [x for x in rows if x["ts"] >= start_ts]
         if end_ts is not None: rows = [x for x in rows if x["ts"] <= end_ts]
+        if offset is not None: rows = rows[offset:]
+        if limit is not None: rows = rows[:limit]
         return rows
 
     async def set_klines(self, symbol: str, interval: str, klines: List[dict]):
