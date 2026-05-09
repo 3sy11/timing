@@ -8,19 +8,14 @@
 # ══════════════════════════════════════════════════════════════
 
 
-# ── AnalysisEngine Coordinator（持有唯一 subscriber fan-out）──
-["timing.analysis.engine.AnalysisEngine"]
-subscriber = {"data.DataEngine.PushBars" = "on_bar"}
-
-
 # ── 生产入口 ──
 ["timing.engine.app.TimingApp"]
-depends = ["data.DataEngine", "analysis.AnalysisEngine"]
+depends = ["data.DataEngine", "analysis.RetracementService"]
 
 
 # ── 回测入口 ──
 ["timing.engine.app.BacktestApp"]
-depends = ["data.DataEngine", "analysis.AnalysisEngine"]
+depends = ["data.DataEngine"]
 
 
 # ── 数据层（共享）──
@@ -41,10 +36,11 @@ module = "bollydog.adapters.sqlalchemy.DuckDBProtocol"
 url = "cache/data.duckdb"
 
 
-# ── 分析服务（生产走 AnalysisEngine fan-out subscriber）──
+# ── 分析服务（subscriber 直接声明在子服务上）──
 ["timing.analysis.algo.retracement.service.RetracementService"]
 cache_path = "cache/analysis"
 depends = ["data.DataEngine"]
+subscriber = {"data.DataEngine.PushBars" = "on_bar"}
 
 ["timing.analysis.algo.retracement.service.RetracementService".protocol]
 module = "bollydog.adapters.composite.CacheLayer"

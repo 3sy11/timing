@@ -11,11 +11,14 @@ class Clock(ABC):
         return self.now_ms() / 1000.0
     @abstractmethod
     async def sleep(self, seconds: float) -> None: ...
+    def set_time_ms(self, ts: int) -> None: ...
 
 
 class LiveClock(Clock):
     def now_ms(self) -> int:
         return int(time.time() * 1000)
+    def set_time_ms(self, ts: int) -> None:
+        pass
     async def sleep(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
 
