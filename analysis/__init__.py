@@ -1,4 +1,4 @@
-"""分析：AnalysisEngine Coordinator + 子服务。"""
-from timing.analysis.engine import AnalysisEngine
+"""分析：AnalysisEngine 基类 + 子服务。"""
+from timing.analysis.app import AnalysisEngine
 
 __all__ = ["AnalysisEngine"]

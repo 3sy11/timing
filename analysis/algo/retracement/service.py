@@ -1,17 +1,20 @@
-"""RetracementService — 继承 AnalysisEngine，实现 _warmup / _process_bar。
+"""RetracementService — 斐波那契回撤分析子服务。
 
-subscriber 由 AnalysisEngine 统一持有，本类不再声明。
+继承 AnalysisEngine，实现 _warmup / _process_bar。
+subscriber 由 TOML 声明（data.DataEngine.PushBars → on_bar）。
+缓存状态全部通过 self.protocol 管理，无本地字典。
 """
-import os, logging, math
+import logging, math
 from dataclasses import asdict
-from typing import Dict, Optional
 import pandas as pd
 from bollydog.globals import hub
-from bollydog.models.service import AppService
-from timing.analysis.engine import AnalysisEngine
+from timing.analysis.app import AnalysisEngine
+from timing.data.models import GetKlines
 from .config import RetracementConfig
 from .command import ComputeRetracement  # noqa: F401
 from .models import TrendLeg, FibGroup
+from .algo import compute_retracement
+from .touch import compute_consensus_strength, check_breakout
 
 log = logging.getLogger(__name__)
 
@@ -53,82 +56,51 @@ class RetracementService(AnalysisEngine):
     def __init__(self, cache_path=None, **kwargs):
         self.config = RetracementConfig()
         super().__init__(cache_path=cache_path, **kwargs)
-        self._live: Dict[str, dict] = {}
-        self.touch_last: Dict[tuple, float] = {}
 
-    def on_init_dependencies(self):
-        if self.protocol: return []
-        from bollydog.adapters.composite import CacheLayer
-        from bollydog.adapters.memory import SQLiteProtocol
-        db_path = os.path.join(self._cache_path, "retracement.sqlite")
-        inner = SQLiteProtocol(path=db_path)
-        proto = CacheLayer(flush_threshold=1)
-        proto.add_dependency(inner)
-        log.info(f'[RetracementService] default protocol: SQLite({db_path}) → CacheLayer')
-        return [proto]
-
-    async def on_start(self) -> None:
-        self._live.clear()
-        self.touch_last.clear()
-        await super().on_start()
-
-    async def on_started(self) -> None:
-        await super().on_started()
-        restored = 0
-        for key in await self.protocol.keys("retracement:*"):
-            serialized = await self.protocol.get(key)
-            if serialized:
-                self._live[key] = _deserialize(serialized)
-                restored += 1
-        if restored: log.info(f'[Retracement] on_started recovered {restored} entries')
-
-    def _key(self, symbol: str, interval: str) -> str:
-        return f"retracement:{symbol}:{interval}"
-
-    async def set_cache(self, symbol: str, interval: str, result: dict):
-        key = self._key(symbol, interval)
-        self._live[key] = result
-        await self.protocol.set(key, _serialize(result))
-
-    def get_cache(self, symbol: str, interval: str) -> Optional[dict]:
-        return self._live.get(self._key(symbol, interval))
-
-    async def _warmup(self, symbol, interval, klines):
-        from .algo import compute_retracement
+    async def _warmup(self, symbol: str, interval: str, klines: list):
         result = compute_retracement(klines, self.config)
-        await self.set_cache(symbol, interval, result)
-        log.info(f'[Retracement] _warmup {symbol}/{interval} klines={len(klines)} groups={len(result.get("groups", []))}')
+        await self.protocol.set(f"retracement:{symbol}:{interval}", _serialize(result))
+        log.info(f'[Retracement] warmup {symbol}/{interval} bars={len(klines)} groups={len(result.get("groups", []))}')
 
     async def _process_bar(self, symbol: str, interval: str, bar: dict) -> dict:
         close = float(bar.get("close", 0))
         if not close: return {"signals": [], "breakouts": [], "recomputed": False}
-        from .touch import compute_consensus_strength, check_breakout
-        from .algo import compute_retracement
         cfg = self.config
-        cache = self.get_cache(symbol, interval)
+        cache_key = f"retracement:{symbol}:{interval}"
+
+        # 读取缓存的回撤计算结果
+        raw = await self.protocol.get(cache_key)
+        cache = _deserialize(raw) if raw else None
         groups = cache.get("groups", []) if cache else []
+
+        # 检测触碰信号（带 cooldown 去重）
         now = self.clock.now_sec()
+        touch_key = f"_touch:{symbol}:{interval}"
+        touch_map = await self.protocol.get(touch_key) or {}
         consensus = compute_consensus_strength(close, groups, cfg=cfg)
         signals = []
         for hit in consensus["hits"]:
-            key = (symbol, interval, hit["ratio"], hit["level_price"])
-            if now - self.touch_last.get(key, 0) < cfg.touch_cooldown_sec: continue
-            self.touch_last[key] = now
+            tk = f"{hit['ratio']}:{hit['level_price']}"
+            if now - touch_map.get(tk, 0) < cfg.touch_cooldown_sec: continue
+            touch_map[tk] = now
             signals.append({"ratio": hit["ratio"], "level_price": hit["level_price"],
                             "touch_price": close, "direction": hit["direction"], "group_idx": hit["group_idx"]})
+        if signals:
+            await self.protocol.set(touch_key, touch_map)
+
+        # 检测突破 → 重新计算回撤结构
         broken = check_breakout(close, groups, cfg=cfg)
         recomputed = False
         if broken:
             broken_idx = {b["group_idx"] for b in broken}
             if cache: cache["groups"] = [g for i, g in enumerate(groups) if i not in broken_idx]
-            from timing.data.models import GetKlines
-            get_cmd = GetKlines(symbol=symbol, interval=interval)
-            result = await hub.execute(get_cmd)
+            result = await hub.execute(GetKlines(symbol=symbol, interval=interval))
             klines = result.state.result() if result and result.state.done() else None
             if klines:
-                result = compute_retracement(klines, cfg)
-                await self.set_cache(symbol, interval, result)
+                new_result = compute_retracement(klines, cfg)
+                await self.protocol.set(cache_key, _serialize(new_result))
                 recomputed = True
             elif cache:
-                await self.set_cache(symbol, interval, cache)
+                await self.protocol.set(cache_key, _serialize(cache))
+
         return {"signals": signals, "breakouts": broken, "recomputed": recomputed}

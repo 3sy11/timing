@@ -18,25 +18,12 @@ depends = ["data.DataEngine", "analysis.RetracementService"]
 depends = ["data.DataEngine"]
 
 
-# ── 数据层（共享）──
-["timing.data.engine.DataEngine"]
+# ── 数据层（protocol 由 DataEngine.on_start 从 Kline schema 自动构建）──
+["timing.data.app.DataEngine"]
 db_path = "cache/data.duckdb"
 
-["timing.data.engine.DataEngine".protocol]
-module = "bollydog.adapters.composite.TableCacheLayer"
-table = "klines"
-key_columns = ["symbol", "interval"]
-value_columns = ["open", "high", "low", "close", "volume", "ts"]
-sort_by = "ts"
-flush_threshold = 1
-ddl = "CREATE TABLE IF NOT EXISTS klines (\"symbol\" VARCHAR, \"interval\" VARCHAR, \"open\" DOUBLE, \"high\" DOUBLE, \"low\" DOUBLE, \"close\" DOUBLE, \"volume\" DOUBLE, \"ts\" BIGINT)"
 
-["timing.data.engine.DataEngine".protocol.protocol]
-module = "bollydog.adapters.sqlalchemy.DuckDBProtocol"
-url = "cache/data.duckdb"
-
-
-# ── 分析服务（subscriber 直接声明在子服务上）──
+# ── 分析服务（subscriber 声明在子服务上）──
 ["timing.analysis.algo.retracement.service.RetracementService"]
 cache_path = "cache/analysis"
 depends = ["data.DataEngine"]
