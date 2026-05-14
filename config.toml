@@ -1,34 +1,39 @@
 # ══════════════════════════════════════════════════════════════
-#  timing 启动配置  —  bollydog service --config config.toml
+#  timing 主配置文件
 #
-#  全服务并存，--domains 过滤启动：
-#    生产：bollydog service --config config.toml --domains timing,data,analysis
-#    回测：TIMING_CLOCK=timing.common.clock.SimulatedClock \
-#          bollydog execute RunBacktest --config config.toml
+#  启动命令：
+#    生产模式：bollydog service --config config.toml
+#    回测模式：.venv/bin/python3 main.py execute RunBacktest --config config.toml --symbol 159363.OF --interval 1d
+#    导入数据：.venv/bin/python3 main.py execute IngestKlinesFromFile --config config.toml --path xxx.parquet --symbol 159363.OF --interval 1d
+#
+#  depends 字段声明服务间依赖关系，框架会按依赖顺序启动：
+#    先启动 DataEngine → 再启动 RetracementService → 再启动 FibStrategy / Broker → 最后启动 App
 # ══════════════════════════════════════════════════════════════
 
 
-# ── 生产入口 ──
+# ── 生产入口（纯容器，靠 depends 把各服务串起来）──
 ["timing.engine.app.TimingApp"]
-depends = ["data.DataEngine", "analysis.RetracementService"]
+depends = ["data.DataEngine", "analysis.RetracementService", "strategy.FibStrategy", "execution.Broker"]
 
 
-# ── 回测入口 ──
+# ── 回测入口（额外从 backtest.toml 动态创建分析实例）──
 ["timing.engine.app.BacktestApp"]
-depends = ["data.DataEngine"]
+depends = ["data.DataEngine", "strategy.FibStrategy", "execution.Broker"]
 
 
-# ── 数据层（protocol 由 DataEngine.on_start 从 Kline schema 自动构建）──
+# ── 数据层（K 线存储，DuckDB 文件路径可改）──
 ["timing.data.app.DataEngine"]
 db_path = "cache/data.duckdb"
 
 
-# ── 分析服务（subscriber 声明在子服务上）──
+# ── 分析层：斐波那契回撤服务 ──
+# subscriber 表示"订阅 PushBars 事件，触发 on_bar 方法"
 ["timing.analysis.algo.retracement.service.RetracementService"]
 cache_path = "cache/analysis"
 depends = ["data.DataEngine"]
 subscriber = {"data.DataEngine.PushBars" = "on_bar"}
 
+# 分析服务的持久化链：CacheLayer(内存) → SQLite(磁盘)
 ["timing.analysis.algo.retracement.service.RetracementService".protocol]
 module = "bollydog.adapters.composite.CacheLayer"
 flush_threshold = 1
@@ -36,3 +41,30 @@ flush_threshold = 1
 ["timing.analysis.algo.retracement.service.RetracementService".protocol.protocol]
 module = "bollydog.adapters.memory.SQLiteProtocol"
 path = "cache/analysis/retracement.sqlite"
+
+
+# ── 策略层：斐波那契策略 ──
+# subscriber 表示"订阅 SignalEmitted 事件，触发 on_signal 方法"
+["timing.strategy.app.FibStrategy"]
+position_size = 0.1
+min_strength = 0.6
+subscriber = {"analysis.AnalysisEngine.SignalEmitted" = "on_signal"}
+
+
+# ── 执行层：Broker + 模拟交易所 ──
+# protocol 链：SimExchangeProtocol(撮合) → CacheLayer(缓存) → SQLite(持久化)
+["timing.execution.broker.Broker"]
+
+["timing.execution.broker.Broker".protocol]
+module = "timing.execution.adapters.sim.SimExchangeProtocol"
+initial_balance = 100000      # 初始资金 10 万
+slippage_pct = 0.001          # 滑点 0.1%
+commission_rate = 0.001       # 手续费率 0.1%
+
+["timing.execution.broker.Broker".protocol.protocol]
+module = "bollydog.adapters.composite.CacheLayer"
+flush_threshold = 1
+
+["timing.execution.broker.Broker".protocol.protocol.protocol]
+module = "bollydog.adapters.memory.SQLiteProtocol"
+path = "cache/execution/broker.sqlite"

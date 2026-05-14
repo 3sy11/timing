@@ -1,8 +1,19 @@
-"""RetracementService — 斐波那契回撤分析子服务。
+"""
+RetracementService — 斐波那契回撤分析子服务。
 
-继承 AnalysisEngine，实现 _warmup / _process_bar。
-subscriber 由 TOML 声明（data.DataEngine.PushBars → on_bar）。
-缓存状态全部通过 self.protocol 管理，无本地字典。
+【继承关系】
+  RetracementService → AnalysisEngine → AppService
+  只需实现 _warmup 和 _process_bar 两个方法
+
+【核心逻辑】
+  _warmup：用前 N 根 K 线计算初始的回撤结构（pivot点 → 腿 → 组 → levels）
+  _process_bar：对每根新 bar 做两件事：
+    1. 检测"触碰" — 价格是否靠近关键回撤位 → 产出信号
+    2. 检测"突破" — 价格是否穿过了某组结构 → 重新计算回撤
+
+【缓存说明】
+  "retracement:{symbol}:{interval}"  — 完整的回撤计算结果（含 groups、features）
+  "_touch:{symbol}:{interval}"       — 触碰去重 map（每个 level 的上次触碰时间）
 """
 import logging, math
 from dataclasses import asdict
@@ -22,13 +33,17 @@ _FEATURE_COLS = ["ts", "high", "low", "close", "conf_high", "conf_low"]
 _PASS_KEYS = ("wmap", "legs_found", "legs_kept")
 
 
+# ──────────────── 序列化/反序列化（缓存用） ────────────────
+
 def _df_records(df, cols=None):
+    """DataFrame → list[dict]，NaN 转 None。"""
     if df is None or df.empty: return []
     recs = (df[cols] if cols else df).to_dict("records")
     return [{k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in r.items()} for r in recs]
 
 
 def _serialize(result: dict) -> dict:
+    """把 compute_retracement 的结果转成可 JSON 序列化的 dict（存缓存用）。"""
     out = {"features": _df_records(result.get("feature_df"), _FEATURE_COLS),
            "clusters_high": _df_records(result.get("clusters_high_df")),
            "clusters_low": _df_records(result.get("clusters_low_df")),
@@ -39,6 +54,7 @@ def _serialize(result: dict) -> dict:
 
 
 def _deserialize(data: dict) -> dict:
+    """把缓存中的 dict 还原成 compute_retracement 格式的对象。"""
     out = {"feature_df": pd.DataFrame(data.get("features", [])),
            "clusters_high_df": pd.DataFrame(data.get("clusters_high", [])),
            "clusters_low_df": pd.DataFrame(data.get("clusters_low", [])),
@@ -48,47 +64,63 @@ def _deserialize(data: dict) -> dict:
     return out
 
 
+# ──────────────── 服务实现 ────────────────
+
 class RetracementService(AnalysisEngine):
     alias = "RetracementService"
     commands = ["timing.analysis.algo.retracement.command"]
     router_mapping = {"ComputeRetracement": ["POST", "/api/timing/compute_retracement"]}
 
     def __init__(self, cache_path=None, **kwargs):
-        self.config = RetracementConfig()
         super().__init__(cache_path=cache_path, **kwargs)
 
+    @property
+    def cfg(self) -> RetracementConfig:
+        """兼容两种 config 来源：TOML create_from 设的 dict / BacktestApp 覆盖的 dict。"""
+        if isinstance(self.config, RetracementConfig): return self.config
+        return RetracementConfig(**(self.config if isinstance(self.config, dict) else {}))
+
     async def _warmup(self, symbol: str, interval: str, klines: list):
-        result = compute_retracement(klines, self.config)
+        """用历史 K 线计算完整的回撤结构并缓存。"""
+        result = compute_retracement(klines, self.cfg)
         await self.protocol.set(f"retracement:{symbol}:{interval}", _serialize(result))
-        log.info(f'[Retracement] warmup {symbol}/{interval} bars={len(klines)} groups={len(result.get("groups", []))}')
+        log.info(f'[回撤分析] 预热完成 {symbol}/{interval} {len(klines)}根K线 → {len(result.get("groups", []))}组结构')
 
     async def _process_bar(self, symbol: str, interval: str, bar: dict) -> dict:
+        """
+        处理单根 bar：
+        1. 读缓存的回撤结构
+        2. 检测是否触碰关键位 → 产出信号
+        3. 检测是否突破结构 → 重新计算
+        """
         close = float(bar.get("close", 0))
         if not close: return {"signals": [], "breakouts": [], "recomputed": False}
-        cfg = self.config
+        cfg = self.cfg
         cache_key = f"retracement:{symbol}:{interval}"
 
-        # 读取缓存的回撤计算结果
+        # ① 从缓存读取之前计算好的回撤结构
         raw = await self.protocol.get(cache_key)
         cache = _deserialize(raw) if raw else None
         groups = cache.get("groups", []) if cache else []
 
-        # 检测触碰信号（带 cooldown 去重）
+        # ② 检测触碰：价格是否靠近某个关键回撤位
         now = self.clock.now_sec()
         touch_key = f"_touch:{symbol}:{interval}"
         touch_map = await self.protocol.get(touch_key) or {}
         consensus = compute_consensus_strength(close, groups, cfg=cfg)
         signals = []
         for hit in consensus["hits"]:
+            # cooldown 去重：同一个 level 短时间内不重复发信号
             tk = f"{hit['ratio']}:{hit['level_price']}"
             if now - touch_map.get(tk, 0) < cfg.touch_cooldown_sec: continue
             touch_map[tk] = now
             signals.append({"ratio": hit["ratio"], "level_price": hit["level_price"],
-                            "touch_price": close, "direction": hit["direction"], "group_idx": hit["group_idx"]})
+                            "touch_price": close, "direction": hit["direction"], "group_idx": hit["group_idx"],
+                            "strength": consensus["strength"]})
         if signals:
             await self.protocol.set(touch_key, touch_map)
 
-        # 检测突破 → 重新计算回撤结构
+        # ③ 检测突破：价格穿过了某组结构的边界 → 该组失效，需要重算
         broken = check_breakout(close, groups, cfg=cfg)
         recomputed = False
         if broken:

@@ -1,1 +1,1 @@
-# ExecutionEngine：预留（见 docs/ARCHITECTURE.md）
+# timing.execution: 执行层 — Broker + ExchangeProtocol

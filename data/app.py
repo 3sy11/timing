@@ -1,7 +1,22 @@
-"""DataEngine — K 线数据层，TableCacheLayer(DuckDB) 内存快读 + 列式落盘。
+"""
+DataEngine — K 线数据存储层。
 
-protocol 链由 on_start 从 Kline schema 自动构建：
-  TableCacheLayer(key=symbol:interval, sort=ts) → DuckDBProtocol(file)
+【职责】
+  存放和查询所有标的的 K 线数据，供分析服务读取。
+
+【存储结构】
+  protocol 链：TableCacheLayer（内存 dict 快读） → DuckDBProtocol（DuckDB 列式落盘）
+  数据按 "symbol:interval" 作为 key 分区，如 "159363.OF:1d"
+  每个 key 对应一个按 ts 排序的 bar 列表
+
+【对外接口】
+  get_klines(symbol, interval, ...) — 同步查询（直接读内存缓存）
+  set_klines / append_bars           — 异步写入（写缓存 + 落盘）
+
+【命令入口（CLI 可调用）】
+  PushBars          — HTTP 推送新 bar → 写入 + 广播给订阅者
+  GetKlines         — 查询 K 线
+  IngestKlinesFromFile — 从 parquet/csv 文件批量导入
 """
 import os, logging
 from typing import List
@@ -30,15 +45,20 @@ class DataEngine(AppService):
         super().__init__(**kwargs)
 
     async def on_start(self) -> None:
-        # 从 Kline schema 构建 protocol 链（TOML 已配置时跳过）
+        """构建 protocol 链：TableCacheLayer → DuckDB（TOML 已配 protocol 时跳过）。"""
         if not self.protocol:
             inner = DuckDBProtocol(url=self._db_path)
-            self.protocol = TableCacheLayer(**table_schema(), protocol=inner)
-            log.info(f'[DataEngine] protocol: DuckDB({self._db_path}) → TableCacheLayer')
+            cache = TableCacheLayer(**table_schema())
+            cache.add_dependency(inner)
+            self.add_dependency(cache)
+            log.info(f'[数据] 协议链就绪: TableCacheLayer → DuckDB({self._db_path})')
         await super().on_start()
+
+    # ──────────────── 查询 ────────────────
 
     def get_klines(self, symbol: str, interval: str, start_ts: int = None, end_ts: int = None,
                    offset: int = None, limit: int = None) -> List[dict]:
+        """同步查询 K 线（直接读 TableCacheLayer 的内存缓存，零 IO）。"""
         rows = list(self.protocol.adapter.get(f"{symbol}:{interval}", []))
         if start_ts is not None: rows = [r for r in rows if r["ts"] >= start_ts]
         if end_ts is not None: rows = [r for r in rows if r["ts"] <= end_ts]
@@ -46,15 +66,19 @@ class DataEngine(AppService):
         if limit is not None: rows = rows[:limit]
         return rows
 
+    # ──────────────── 写入 ────────────────
+
     async def set_klines(self, symbol: str, interval: str, klines: List[dict]):
+        """全量覆盖写入（导入数据时用）。"""
         await self.protocol.set(f"{symbol}:{interval}", klines)
-        log.info(f'[Data] set_klines {symbol}/{interval} rows={len(klines)}')
+        log.info(f'[数据] 写入 {symbol}/{interval} 共{len(klines)}条')
 
     async def append_bars(self, symbol: str, interval: str, bars: List[dict]):
+        """增量追加 bars（实时推送时用）。"""
         key = f"{symbol}:{interval}"
         existing = list(self.protocol.adapter.get(key, []))
         normalized = [{"open": float(b["open"]), "high": float(b["high"]), "low": float(b["low"]),
                        "close": float(b["close"]), "volume": float(b.get("volume", 0)), "ts": int(b["ts"])} for b in bars]
         existing.extend(normalized)
         await self.protocol.set(key, existing)
-        log.info(f'[Data] append_bars {symbol}/{interval} +{len(bars)} total={len(existing)}')
+        log.info(f'[数据] 追加 {symbol}/{interval} +{len(bars)} 总计{len(existing)}条')

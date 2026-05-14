@@ -1,4 +1,11 @@
-"""DataEngine Commands — 数据写入 / 查询命令。"""
+"""
+DataEngine 的命令定义 — CLI 和 HTTP 都通过这些命令与 DataEngine 交互。
+
+【路由机制】
+  每个命令的 destination 格式为 "domain.alias.CommandName"
+  框架根据 destination 找到对应的 AppService 实例，在其上下文中执行 __call__
+  __call__ 中的 `app` 就是 DataEngine 实例
+"""
 import logging
 from typing import Any, ClassVar, List
 from pydantic import Field
@@ -10,8 +17,11 @@ log = logging.getLogger(__name__)
 
 
 class PushBars(BaseCommand):
-    """HTTP 推送 bars → 写入 DataEngine → _publish 广播给 subscriber。
-    replay=True 跳过写入，仅构造结果触发广播链。
+    """
+    推送新 bar 数据。
+
+    生产用：外部 HTTP 调用 → 写入 DataEngine → 自动广播给所有订阅了 PushBars 的分析服务
+    回测用：replay=True 时不写入，只作为事件载体触发分析服务的 on_bar
     """
     destination: ClassVar[str] = "data.DataEngine.PushBars"
     symbol: str = ""
@@ -24,12 +34,11 @@ class PushBars(BaseCommand):
                        "close": float(b["close"]), "volume": float(b.get("volume", 0)), "ts": int(b["ts"])} for b in self.bars]
         if not self.replay:
             await app.append_bars(self.symbol, self.interval, normalized)
-            log.info(f'[Data] PushBars {self.symbol}/{self.interval} +{len(normalized)}')
         return {"symbol": self.symbol, "interval": self.interval, "bars": normalized}
 
 
 class GetKlines(BaseCommand):
-    """查询 klines — 通过命令分派解耦对 DataEngine 的直接引用。"""
+    """查询 K 线数据（通过命令分派，解耦对 DataEngine 的直接引用）。"""
     destination: ClassVar[str] = "data.DataEngine.GetKlines"
     symbol: str = ""
     interval: str = ""
@@ -44,7 +53,7 @@ class GetKlines(BaseCommand):
 
 
 class IngestKlinesFromFile(BaseCommand):
-    """从 parquet/csv 文件导入 K 线数据。"""
+    """从 parquet/csv 文件批量导入 K 线数据到 DataEngine。"""
     destination: ClassVar[str] = "data.DataEngine.IngestKlinesFromFile"
     path: str = ""
     symbol: str = ""
@@ -53,5 +62,5 @@ class IngestKlinesFromFile(BaseCommand):
     async def __call__(self, *args, **kwargs) -> Any:
         klines = read_file(self.path)
         await app.set_klines(self.symbol, self.interval, klines)
-        log.info(f'[Data] IngestKlines {self.symbol}/{self.interval} rows={len(klines)}')
+        log.info(f'[数据] 从文件导入 {self.symbol}/{self.interval} 共{len(klines)}条')
         return {"symbol": self.symbol, "interval": self.interval, "rows": len(klines)}

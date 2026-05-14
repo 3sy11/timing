@@ -1,25 +1,32 @@
 # ══════════════════════════════════════════════════════════════
-#  回测配置 — BacktestApp.on_init_dependencies 读取
+#  回测配置 — BacktestApp.on_init_dependencies 读取此文件
 #
-#  每个 [[services]] 动态创建一个带序号 alias 的分析子服务实例
-#  例：RetracementService_0, RetracementService_1
+#  用途：定义回测时要创建哪些分析子服务实例，以及各自的参数覆盖。
+#  同一个分析服务可以用不同参数创建多份实例，进行参数对比实验。
+#
+#  RunBacktest 命令行传入 --symbol 和 --interval 覆盖这里的默认值。
 # ══════════════════════════════════════════════════════════════
 
+# 默认回测标的（命令行可覆盖）
 warmup_bars = 200
 symbol = "BTCUSDT"
 interval = "1h"
 
+
+# ── 实例 0：宽松触碰条件 ──
 [[services]]
 module = "timing.analysis.algo.retracement.service.RetracementService"
 cache_path = "cache/backtest/retracement_0"
 [services.config]
-touch_tolerance = 0.3
-min_leg_span_pct = 0.05
+touch_tolerance = 0.3       # 触碰容差（价格偏离关键位多少算"碰到"）
+min_leg_span_pct = 0.05     # 最小腿幅百分比
 
+
+# ── 实例 1：严格触碰 + 跳过最近 5 根 bar ──
 [[services]]
 module = "timing.analysis.algo.retracement.service.RetracementService"
 cache_path = "cache/backtest/retracement_1"
 [services.config]
-touch_tolerance = 0.5
-min_leg_span_pct = 0.03
-skip_recent = 5
+touch_tolerance = 0.5       # 更严格的触碰容差
+min_leg_span_pct = 0.03     # 更小的腿幅要求
+skip_recent = 5             # 跳过最近 5 根 bar（避免噪声）
