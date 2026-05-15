@@ -1,4 +1,5 @@
-"""Position — 持仓数据模型，支持 apply_fill 增减仓 + 盈亏计算。"""
+"""Position — 持仓事实表模型，记录在 SQLite 中，支持 apply_fill 增减仓 + 盈亏计算。"""
+import time
 from typing import Literal
 from pydantic import BaseModel
 from timing.models.order import FillResult
@@ -13,15 +14,21 @@ class Position(BaseModel):
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     commission: float = 0.0
+    trade_count: int = 0
+    open_ts: int = 0
+    updated_at: int = 0
 
     def apply_fill(self, fill: FillResult) -> float:
         """应用成交结果，返回本次 realized_pnl。"""
         rpnl = 0.0
         self.commission += fill.commission
+        self.trade_count += 1
+        self.updated_at = fill.ts or int(time.time() * 1000)
         if self.side == "flat":
             self.side = "long" if fill.side == "buy" else "short"
             self.quantity = fill.filled_quantity
             self.avg_entry_price = fill.filled_price
+            self.open_ts = fill.ts
         elif (self.side == "long" and fill.side == "buy") or (self.side == "short" and fill.side == "sell"):
             total_cost = self.avg_entry_price * self.quantity + fill.filled_price * fill.filled_quantity
             self.quantity += fill.filled_quantity
@@ -35,6 +42,7 @@ class Position(BaseModel):
                     self.side = "long" if fill.side == "buy" else "short"
                     self.quantity = remaining
                     self.avg_entry_price = fill.filled_price
+                    self.open_ts = fill.ts
                 else:
                     self.side = "flat"
                     self.quantity = 0.0

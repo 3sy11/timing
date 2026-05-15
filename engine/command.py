@@ -28,19 +28,23 @@ class RunBacktest(BaseCommand):
     interval: str = ""
 
     async def __call__(self, *args, **kwargs) -> Any:
-        # ① 确定回测标的和周期
         params = getattr(app, '_bt_params', {})
         symbol = self.symbol or params.get("symbol", "")
         interval = self.interval or params.get("interval", "")
 
-        # ② 从 DataEngine 获取全部 K 线数据
         result = await hub.execute(GetKlines(symbol=symbol, interval=interval))
         klines = result.state.result()
         if not klines:
             log.warning(f'[回测] {symbol}/{interval} 无数据，退出')
             return None
 
-        # ③ 清除 checkpoint — 确保分析服务从头处理所有数据
+        # ① 清除 _services：隔离生产配置，只保留 BacktestApp 动态创建的实例
+        bt_aliases = {dep.alias for dep in (getattr(app, '_children', None) or []) if isinstance(dep, AnalysisEngine)}
+        stale = [k for k in AnalysisEngine._services if k not in bt_aliases]
+        for k in stale: del AnalysisEngine._services[k]
+        log.info(f'[回测] 清除生产服务 {stale}，保留回测实例 {list(bt_aliases)}')
+
+        # ② 清除回测实例的 checkpoint
         for svc in AnalysisEngine._services.values():
             if svc.protocol and getattr(svc.protocol, 'protocol', None):
                 await svc.protocol.remove(f"__ckpt:{symbol}:{interval}")

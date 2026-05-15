@@ -34,7 +34,7 @@ class SimExchangeProtocol(ExchangeProtocol):
 
     async def on_start(self) -> None:
         """初始化账户和挂单列表。"""
-        self.account = Account(total=self._initial_balance, locked=0.0)
+        self.account = Account(initial_balance=self._initial_balance, total=self._initial_balance, locked=0.0)
         self._pending_orders = []
         self.adapter = {"account": self.account}
         log.info(f'[模拟交易所] 就绪 初始资金={self._initial_balance} 滑点={self.slippage_pct} 手续费率={self.commission_rate}')
