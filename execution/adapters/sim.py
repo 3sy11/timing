@@ -33,8 +33,7 @@ class SimExchangeProtocol(ExchangeProtocol):
         super().__init__(**kwargs)
 
     async def on_start(self) -> None:
-        """初始化账户和挂单列表。"""
-        self.account = Account(initial_balance=self._initial_balance, total=self._initial_balance, locked=0.0)
+        self.account = Account(initial_balance=self._initial_balance, total=self._initial_balance)
         self._pending_orders = []
         self.adapter = {"account": self.account}
         log.info(f'[模拟交易所] 就绪 初始资金={self._initial_balance} 滑点={self.slippage_pct} 手续费率={self.commission_rate}')
@@ -51,20 +50,16 @@ class SimExchangeProtocol(ExchangeProtocol):
         return None
 
     def _fill_market(self, order: Order, bar: dict) -> FillResult:
-        """Market 撮合：close ± 滑点 → 扣钱/加钱 → 返回成交结果。"""
+        """Market 撮合：close ± 滑点 → settle 结算 → 返回成交结果。"""
         base_price = bar.get("close", bar.get("open", 0.0))
-        # 买入时加滑点（成交价更高），卖出时减滑点（成交价更低）
         slip_direction = 1 if order.side == "buy" else -1
         fill_price = base_price * (1 + self.slippage_pct * slip_direction)
         commission = fill_price * order.quantity * self.commission_rate
         cost = fill_price * order.quantity
-        # 更新账户余额
-        if order.side == "buy":
-            self.account.total -= cost + commission
-        else:
-            self.account.total += cost - commission
+        pnl = -cost if order.side == "buy" else cost
+        self.account.settle(pnl, commission)
         order.mark_filled(fill_price, order.quantity, commission, bar.get("ts", 0))
-        log.info(f'[模拟交易所] 成交 {order.side} {order.symbol} 数量={order.quantity} 价格={fill_price:.4f} 手续费={commission:.4f}')
+        log.info(f'[SimExchange] {order.side} {order.symbol} qty={order.quantity} px={fill_price:.4f} fee={commission:.4f}')
         return FillResult(order_id=order.order_id, symbol=order.symbol, side=order.side,
                           filled_price=fill_price, filled_quantity=order.quantity, commission=commission, ts=bar.get("ts", 0))
 

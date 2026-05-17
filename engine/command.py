@@ -69,6 +69,11 @@ class RunBacktest(BaseCommand):
         # ⑥ 并行执行所有分析服务的 on_bar（内部信号会同步传给策略→执行层）
         results = await asyncio.gather(*(hub.execute(cmd) for cmd in cmds), return_exceptions=True)
 
+        # TODO: 重构为逐 bar 模式后，在每根 bar 的 subscriber 链执行完毕后调用
+        #   broker = hub.get_service("execution.Broker")
+        #   fills = await broker.process_pending(bar)
+        # 当前一次性批量模式下无法逐 bar 调用 check_pending
+
         # ⑦ 统计结果
         errors = [r for r in results if isinstance(r, Exception)]
         if errors: log.error(f'[回测] {len(errors)} 个错误: {errors}')
