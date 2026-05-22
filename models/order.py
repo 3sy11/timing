@@ -1,4 +1,4 @@
-"""Order — 订单数据模型 + FillResult + 订单事件。"""
+"""Order + FillResult + OrderFilled/OrderRejected 事件。"""
 import uuid
 from typing import ClassVar, Literal
 from pydantic import BaseModel, Field

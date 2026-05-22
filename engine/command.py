@@ -1,17 +1,4 @@
-"""
-RunBacktest — 回测命令。
-
-【执行流程】
-  1. 从 DataEngine 拉取指定 symbol/interval 的全部 K 线
-  2. 清除所有分析服务的 checkpoint（确保每次回测都从头跑）
-  3. 构造一个假的 PushBars 事件作为载体
-  4. 通过 Exchange 匹配所有订阅了 PushBars 的 handler（即各分析服务的 on_bar）
-  5. asyncio.gather 并行执行所有 handler
-  6. 在 handler 内部，信号会同步传递给策略层和执行层
-
-【使用方式】
-  .venv/bin/python3 main.py execute RunBacktest --config config.toml --symbol 159363.OF --interval 1d
-"""
+"""RunBacktest — 回测命令。"""
 import asyncio, logging
 from typing import Any, ClassVar
 from bollydog.globals import app, hub
@@ -32,52 +19,67 @@ class RunBacktest(BaseCommand):
         symbol = self.symbol or params.get("symbol", "")
         interval = self.interval or params.get("interval", "")
 
-        result = await hub.execute(GetKlines(symbol=symbol, interval=interval))
-        klines = result.state.result()
+        klines = await hub.execute(GetKlines(symbol=symbol, interval=interval))
         if not klines:
             log.warning(f'[回测] {symbol}/{interval} 无数据，退出')
             return None
 
-        # ① 清除 _services：隔离生产配置，只保留 BacktestApp 动态创建的实例
+        # 清除生产 _services，只保留回测实例
         bt_aliases = {dep.alias for dep in (getattr(app, '_children', None) or []) if isinstance(dep, AnalysisEngine)}
         stale = [k for k in AnalysisEngine._services if k not in bt_aliases]
         for k in stale: del AnalysisEngine._services[k]
         log.info(f'[回测] 清除生产服务 {stale}，保留回测实例 {list(bt_aliases)}')
 
-        # ② 清除回测实例的 checkpoint
+        # 清除 checkpoint
         for svc in AnalysisEngine._services.values():
             if svc.protocol and getattr(svc.protocol, 'protocol', None):
                 await svc.protocol.remove(f"__ckpt:{symbol}:{interval}")
             elif svc.protocol:
                 svc.protocol._cache.pop(f"__ckpt:{symbol}:{interval}", None)
 
-        # ④ 构造 PushBars 事件载体（replay=True 表示不写入数据库）
+        # 构造 PushBars 载体（replay=True 不写入数据库）
         push = PushBars(symbol=symbol, interval=interval, bars=[], replay=True)
         push.state.set_result({"symbol": symbol, "interval": interval, "bars": []})
 
-        # ⑤ 从 Exchange 找到所有订阅了 PushBars 的 handler（各分析服务的 on_bar）
         topic = type(push).destination
         handlers = list(hub.exchange.match(topic))
         cmds = []
         for handler_cls in handlers:
             cmd = handler_cls()
-            cmd.add_event(push)
+            cmd._source = push
             cmds.append(cmd)
 
         log.info(f'[回测] 开始 {symbol}/{interval} 共{len(klines)}根K线 {len(cmds)}个分析服务')
-
-        # ⑥ 并行执行所有分析服务的 on_bar（内部信号会同步传给策略→执行层）
         results = await asyncio.gather(*(hub.execute(cmd) for cmd in cmds), return_exceptions=True)
-
-        # TODO: 重构为逐 bar 模式后，在每根 bar 的 subscriber 链执行完毕后调用
-        #   broker = hub.get_service("execution.Broker")
-        #   fills = await broker.process_pending(bar)
-        # 当前一次性批量模式下无法逐 bar 调用 check_pending
-
-        # ⑦ 统计结果
         errors = [r for r in results if isinstance(r, Exception)]
         if errors: log.error(f'[回测] {len(errors)} 个错误: {errors}')
-        log.info(f'[回测] 完成 {symbol}/{interval} 错误={len(errors)}')
-        return {"symbol": symbol, "interval": interval,
-                "services": len(AnalysisEngine._services), "klines_total": len(klines),
-                "handlers": len(cmds), "errors": len(errors)}
+
+        # 收集中间结果
+        signals, decisions, fills = [], [], []
+        for svc in AnalysisEngine._services.values():
+            if svc.protocol:
+                sigs = await svc.protocol.get(f"signals:{symbol}:{interval}")
+                if sigs: signals.extend(sigs)
+        from timing.strategy.app import FibStrategy
+        for svc in FibStrategy._apps.values():
+            if hasattr(svc, 'protocol') and svc.protocol:
+                decs = await svc.protocol.get(f"decisions:{symbol}")
+                if decs: decisions.extend(decs)
+        broker = None
+        for svc in list(app._children or []):
+            if getattr(svc, 'alias', '') == 'Broker':
+                broker = svc; break
+        if broker and broker.protocol:
+            fill_keys = await broker.protocol.keys("__fills:*")
+            for fk in fill_keys:
+                f = await broker.protocol.get(fk)
+                if f: fills.append(f)
+        account = await broker.get_account() if broker else None
+        positions = broker.get_all_positions() if broker else {}
+
+        log.info(f'[回测] 完成 {symbol}/{interval} 信号={len(signals)} 决策={len(decisions)} 成交={len(fills)} 错误={len(errors)}')
+        return {"symbol": symbol, "interval": interval, "klines_total": len(klines),
+                "signals": signals, "decisions": decisions, "fills": fills,
+                "account": account.model_dump() if account else {},
+                "positions": {s: p.model_dump() for s, p in positions.items()},
+                "errors": len(errors)}

@@ -1,13 +1,7 @@
-"""Kline — K 线数据 Pydantic 模型 + TableCacheLayer schema 自动推导。
-
-DataEngine 通过 table_schema() 获取构建 protocol 链所需的全部参数。
-数据按 (symbol, interval) 分区存储，ts 排序。
-"""
+"""Kline 数据模型 + TableCacheLayer schema 推导。"""
 from pydantic import BaseModel
 
 _TYPE_MAP = {float: 'DOUBLE', int: 'BIGINT', str: 'VARCHAR'}
-
-# 分区键（非 Kline 字段，由存储层管理）
 KEY_COLUMNS = ["symbol", "interval"]
 SORT_BY = "ts"
 
@@ -22,14 +16,12 @@ class Kline(BaseModel):
     ts: int
 
 
-OHLCV = Kline
-Bar = Kline
+OHLCV = Bar = Kline
 VALUE_COLUMNS = list(Kline.model_fields.keys())
 ALL_COLUMNS = KEY_COLUMNS + VALUE_COLUMNS
 
 
 def kline_ddl(table: str = 'klines') -> str:
-    """从模型字段自动生成 CREATE TABLE DDL。"""
     parts = [f'"{k}" {_TYPE_MAP[str]}' for k in KEY_COLUMNS]
     for name, fi in Kline.model_fields.items():
         parts.append(f'"{name}" {_TYPE_MAP.get(fi.annotation, "VARCHAR")}')
@@ -37,6 +29,5 @@ def kline_ddl(table: str = 'klines') -> str:
 
 
 def table_schema(table: str = 'klines', flush_threshold: int = 1) -> dict:
-    """返回 TableCacheLayer 构造所需的全部参数。"""
     return {"table": table, "key_columns": KEY_COLUMNS, "value_columns": VALUE_COLUMNS,
             "sort_by": SORT_BY, "ddl": kline_ddl(table), "flush_threshold": flush_threshold}

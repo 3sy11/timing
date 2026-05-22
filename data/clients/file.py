@@ -1,5 +1,5 @@
 """duckdb .df() 读 parquet/csv → pandas 按 OHLCV.meta 规整 → list[dict]。
-读文件 Command 在 timing.data.models.IngestKlinesFromFile，此处仅纯函数 read_file。"""
+读文件 Command 在 timing.data.models.ImportKlines，此处仅纯函数 read_file。"""
 import csv, logging, os
 from typing import Dict, List
 import duckdb

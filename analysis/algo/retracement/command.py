@@ -21,8 +21,7 @@ class ComputeRetracement(BaseCommand):
         if not klines:
             from timing.data.models import GetKlines
             get_cmd = GetKlines(symbol=self.symbol, interval=self.interval)
-            result = await hub.execute(get_cmd)
-            klines = result.state.result() if result and result.state.done() else None
+            klines = await hub.execute(get_cmd)
         if not klines:
             log.warning(f'[Retracement] ComputeRetracement: no klines for {self.symbol}/{self.interval}'); return None
         from .algo import compute_retracement

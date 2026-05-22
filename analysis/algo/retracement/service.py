@@ -126,8 +126,7 @@ class RetracementService(AnalysisEngine):
         if broken:
             broken_idx = {b["group_idx"] for b in broken}
             if cache: cache["groups"] = [g for i, g in enumerate(groups) if i not in broken_idx]
-            result = await hub.execute(GetKlines(symbol=symbol, interval=interval))
-            klines = result.state.result() if result and result.state.done() else None
+            klines = await hub.execute(GetKlines(symbol=symbol, interval=interval))
             if klines:
                 new_result = compute_retracement(klines, cfg)
                 await self.protocol.set(cache_key, _serialize(new_result))
