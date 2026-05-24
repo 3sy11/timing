@@ -13,6 +13,10 @@ depends = ["data.DataEngine", "analysis.RetracementService", "strategy.FibStrate
 ["timing.engine.app.BacktestApp"]
 depends = ["data.DataEngine", "strategy.FibStrategy", "execution.Broker"]
 
+# ── 后管服务 ──
+["timing.dashboard.app.DashboardService"]
+cache_path = "cache/dashboard"
+
 # ── 数据层 ──
 ["timing.data.app.DataEngine"]
 db_path = "cache/data.duckdb"

@@ -20,7 +20,7 @@ class BacktestApp(AppService):
     """回测入口 — 读 backtest.toml 动态创建分析实例 + 注册 subscriber。"""
     domain = "backtest"
     alias = "BacktestApp"
-    commands = ["timing.engine.command"]
+    commands = ["timing.engine.command", "timing.engine.batch"]
 
     def __init__(self, backtest_config="backtest.toml", **kwargs):
         self._bt_config_path = backtest_config
