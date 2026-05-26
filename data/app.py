@@ -12,7 +12,8 @@ class DataEngine(AppService):
     domain = "data"
     alias = "DataEngine"
     commands = ["models"]
-    router_mapping = {"PushBars": ["POST", "/api/timing/push_bars"], "ImportKlines": ["POST", "/api/timing/import_klines"]}
+    router_mapping = {"PushBars": ["POST", "/api/timing/push_bars"], "ImportKlines": ["POST", "/api/timing/import_klines"],
+                      "GetKlinesAPI": ["GET", "/api/data/klines"], "ListSymbols": ["GET", "/api/data/symbols"]}
 
     def __init__(self, db_path: str = None, **kwargs):
         self._db_path = db_path or DEFAULT_DB_PATH

@@ -69,7 +69,7 @@ def _deserialize(data: dict) -> dict:
 class RetracementService(AnalysisEngine):
     alias = "RetracementService"
     commands = ["timing.analysis.algo.retracement.command"]
-    router_mapping = {"ComputeRetracement": ["POST", "/api/timing/compute_retracement"]}
+    router_mapping = {"ComputeRetracement": ["POST", "/api/timing/compute_retracement"], "GetSignals": ["GET", "/api/data/signals"]}
 
     def __init__(self, cache_path=None, **kwargs):
         super().__init__(cache_path=cache_path, **kwargs)

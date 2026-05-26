@@ -8,7 +8,7 @@ from .models import BatchJob, BacktestRun, BacktestProgress
 from timing.common.metrics import compute_metrics
 
 log = logging.getLogger(__name__)
-WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
+WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
 
 
 class DashboardService(AppService):

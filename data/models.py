@@ -48,3 +48,25 @@ class ImportKlines(BaseCommand):
         await app.set_klines(self.symbol, self.interval, klines)
         log.info(f'[数据] 从文件导入 {self.symbol}/{self.interval} 共{len(klines)}条')
         return {"symbol": self.symbol, "interval": self.interval, "count": len(klines)}
+
+
+class GetKlinesAPI(BaseCommand):
+    destination: ClassVar[str] = "data.DataEngine.GetKlinesAPI"
+    symbol: str = ""
+    interval: str = ""
+    start_ts: int = None
+    end_ts: int = None
+    limit: int = 5000
+
+    async def __call__(self, *args, **kwargs) -> Any:
+        rows = app.get_klines(self.symbol, self.interval, self.start_ts, self.end_ts, limit=self.limit)
+        return rows
+
+
+class ListSymbols(BaseCommand):
+    destination: ClassVar[str] = "data.DataEngine.ListSymbols"
+
+    async def __call__(self, *args, **kwargs) -> Any:
+        sql = "SELECT symbol, interval, COUNT(*) as count, MIN(ts) as first_ts, MAX(ts) as last_ts FROM klines GROUP BY symbol, interval"
+        result = app._conn.execute(sql).fetchall()
+        return [{"symbol": r[0], "interval": r[1], "count": r[2], "first_ts": r[3], "last_ts": r[4]} for r in result]

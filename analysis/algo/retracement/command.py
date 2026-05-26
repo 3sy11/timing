@@ -1,4 +1,4 @@
-"""Retracement command — ComputeRetracement 薄壳委托。"""
+"""Retracement commands — ComputeRetracement + GetSignals。"""
 import logging
 from typing import Any, ClassVar
 from bollydog.globals import app, hub
@@ -31,3 +31,13 @@ class ComputeRetracement(BaseCommand):
         log.info(f'[Retracement] ComputeRetracement {self.symbol}/{self.interval} klines={len(klines)} groups={len(groups)}')
         return {"symbol": self.symbol, "interval": self.interval, "klines": len(klines),
                 "groups": len(groups), "legs_found": result.get("legs_found", 0), "legs_kept": result.get("legs_kept", 0)}
+
+
+class GetSignals(BaseCommand):
+    destination: ClassVar[str] = "analysis.RetracementService.GetSignals"
+    symbol: str = ""
+    interval: str = ""
+
+    async def __call__(self, *args, **kwargs) -> Any:
+        if not app.protocol: return []
+        return await app.protocol.get(f"signals:{self.symbol}:{self.interval}") or []

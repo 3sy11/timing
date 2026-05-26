@@ -24,6 +24,9 @@
 | PushBars | DataEngine | `data.DataEngine.PushBars` | — |
 | GetKlines | DataEngine | `data.DataEngine.GetKlines` | — |
 | ImportKlines | DataEngine | `data.DataEngine.ImportKlines` | — |
+| GetKlinesAPI | DataEngine | `data.DataEngine.GetKlinesAPI` | — |
+| ListSymbols | DataEngine | `data.DataEngine.ListSymbols` | — |
+| GetSignals | RetracementService | `analysis.RetracementService.GetSignals` | — |
 | ComputeRetracement | RetracementService | `analysis.RetracementService.ComputeRetracement` | — |
 | SubmitOrder | Broker | `execution.Broker.SubmitOrder` | — |
 | CancelOrder | Broker | `execution.Broker.CancelOrder` | — |
