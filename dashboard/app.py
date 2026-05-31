@@ -1,14 +1,21 @@
 """DashboardService — 后管服务，挂载静态前端 + 管理回测运行记录。"""
 import os, time, logging, itertools
 from bollydog.models.service import AppService
-from bollydog.adapters.composite import CacheLayer
-from bollydog.adapters.memory import SQLiteProtocol
 from bollydog.globals import hub
-from .models import BatchJob, BacktestRun, BacktestProgress
+from timing.adapters.sqlite import TableSchema, StructuredSQLiteProtocol
+from timing.dashboard.models import BatchJob, BacktestRun, RunDetail, Dataset, BacktestProgress
 from timing.common.metrics import compute_metrics
 
 log = logging.getLogger(__name__)
+DATA_ROOT = os.environ.get("TIMING_DATA_ROOT", "warehouse/timing")
 WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+
+DASHBOARD_SCHEMAS = [
+    TableSchema(model=BatchJob, table="jobs", key_columns=["job_id"]),
+    TableSchema(model=BacktestRun, table="runs", key_columns=["run_id"]),
+    TableSchema(model=RunDetail, table="run_details", key_columns=["run_id"]),
+    TableSchema(model=Dataset, table="datasets", key_columns=["symbol", "interval"]),
+]
 
 
 class DashboardService(AppService):
@@ -24,29 +31,27 @@ class DashboardService(AppService):
         "UploadData": ["POST", "/api/dashboard/upload"],
     }
 
-    def __init__(self, cache_path: str = "cache/dashboard", **kwargs):
-        self._cache_path = cache_path
+    def __init__(self, cache_path: str = None, **kwargs):
+        self._cache_path = cache_path or DATA_ROOT
+        self.db: StructuredSQLiteProtocol = None
         super().__init__(**kwargs)
 
     async def on_start(self) -> None:
         os.makedirs(self._cache_path, exist_ok=True)
-        if not self.protocol:
-            inner = SQLiteProtocol(path=os.path.join(self._cache_path, "dashboard.sqlite"))
-            cache = CacheLayer(flush_threshold=1)
-            cache.add_dependency(inner)
-            self.protocol = cache
-            await cache.maybe_start()
+        db_path = os.path.join(self._cache_path, "dashboard.sqlite")
+        self.db = StructuredSQLiteProtocol(path=db_path, schemas=DASHBOARD_SCHEMAS)
+        await self.db.on_start()
+        log.info(f'[Dashboard] DB就绪: {db_path}')
         await super().on_start()
 
     async def on_started(self) -> None:
-        # 延迟挂载静态文件：等所有服务启动完毕后再 mount（避免 HttpService 路由日志遍历 Mount 对象报错）
         import asyncio
         asyncio.ensure_future(self._mount_static_delayed())
         await super().on_started()
 
     async def _mount_static_delayed(self):
         import asyncio
-        await asyncio.sleep(0.5)  # 确保 HttpService.on_started 完成
+        await asyncio.sleep(0.5)
         try:
             from starlette.staticfiles import StaticFiles
             http_svc = next((s for s in AppService._apps.values() if getattr(s, 'alias', '') == 'HttpService'), None)
@@ -59,7 +64,6 @@ class DashboardService(AppService):
             log.warning(f'[Dashboard] 静态挂载失败: {e}')
 
     async def run_batch_job(self, job: BatchJob):
-        """异步执行批量回测任务，逐组广播进度。"""
         from timing.engine.command import RunBacktest
         from timing.analysis.app import AnalysisEngine
         from timing.strategy.app import FibStrategy
@@ -70,7 +74,7 @@ class DashboardService(AppService):
         combos = [dict(zip(keys, combo)) for combo in itertools.product(*values)]
         job.total_runs = len(combos)
         job.status = "running"
-        await self.protocol.set("__current_job", job.model_dump())
+        await self.db.put("jobs", job.model_dump(), job_id=job.job_id)
 
         strategy_keys = {"position_size", "min_strength"}
 
@@ -78,7 +82,6 @@ class DashboardService(AppService):
             run = BacktestRun(symbol=job.symbol, interval=job.interval, params=combo, status="running")
             job.runs.append(run.run_id)
 
-            # 应用参数
             analysis_params = {k: v for k, v in combo.items() if k not in strategy_keys}
             strategy_params = {k: v for k, v in combo.items() if k in strategy_keys}
             for svc in AnalysisEngine._services.values():
@@ -89,10 +92,8 @@ class DashboardService(AppService):
                 if "position_size" in strategy_params: svc.position_size = strategy_params["position_size"]
                 if "min_strength" in strategy_params: svc.min_strength = strategy_params["min_strength"]
 
-            # 重置状态
             await self._reset_state(job.symbol, job.interval)
 
-            # 广播进度：running
             await hub.dispatch(BacktestProgress(
                 job_id=job.job_id, run_index=idx, total_runs=job.total_runs,
                 status="running", params=combo, run_id=run.run_id))
@@ -106,12 +107,10 @@ class DashboardService(AppService):
                     initial = account.get("initial_balance", 100000)
                     final = account.get("total", initial)
                     m = compute_metrics(fills, initial, final)
-                    m.pop("equity_curve", None)  # 不存到摘要里
+                    m.pop("equity_curve", None)
                     run.metrics = m
                     run.status = "completed"
-                    # 存储详细结果（含 klines）
-                    await self.protocol.set(f"__run_detail:{run.run_id}", {
-                        **run.model_dump(), "result": result})
+                    await self.db.put("run_details", {"run_id": run.run_id, "data": result}, run_id=run.run_id)
                 else:
                     run.status = "failed"
                     run.error = "no result"
@@ -123,19 +122,15 @@ class DashboardService(AppService):
             run.completed_at = int(time.time() * 1000)
             job.completed_runs = idx + 1
 
-            # 广播进度：completed/failed
             await hub.dispatch(BacktestProgress(
                 job_id=job.job_id, run_index=idx, total_runs=job.total_runs,
                 status=run.status, params=combo, metrics=run.metrics, run_id=run.run_id))
 
-            # 保存 run 到列表
-            all_runs = await self.protocol.get("__runs") or []
-            all_runs.append(run.model_dump())
-            await self.protocol.set("__runs", all_runs)
-            await self.protocol.set("__current_job", job.model_dump())
+            await self.db.put("runs", run.model_dump(), run_id=run.run_id)
+            await self.db.put("jobs", job.model_dump(), job_id=job.job_id)
 
         job.status = "completed"
-        await self.protocol.set("__current_job", job.model_dump())
+        await self.db.put("jobs", job.model_dump(), job_id=job.job_id)
         log.info(f'[Dashboard] 批量回测完成 job={job.job_id} {job.completed_runs}/{job.total_runs}')
 
     async def _reset_state(self, symbol: str, interval: str):
@@ -145,23 +140,23 @@ class DashboardService(AppService):
         from bollydog.globals import app as _app
 
         for svc in AnalysisEngine._services.values():
-            if not svc.protocol: continue
-            for key in [f"__ckpt:{symbol}:{interval}", f"signals:{symbol}:{interval}",
-                        f"_touch:{symbol}:{interval}", f"retracement:{symbol}:{interval}"]:
-                await svc.protocol.remove(key)
+            if not svc.db: continue
+            await svc.db.delete("checkpoints", symbol=symbol, interval=interval)
+            await svc.db.delete("signals", symbol=symbol, interval=interval)
+            await svc.db.delete("touches", symbol=symbol, interval=interval)
+            await svc.db.delete("retracements", symbol=symbol, interval=interval)
+
         for svc in FibStrategy._apps.values():
-            if hasattr(svc, 'protocol') and svc.protocol:
-                await svc.protocol.remove(f"decisions:{symbol}")
+            if hasattr(svc, 'db') and svc.db:
+                await svc.db.delete("decisions", symbol=symbol)
 
         broker = next((s for s in (_app._children or []) if getattr(s, 'alias', '') == 'Broker'), None)
-        if broker and broker.protocol:
-            for fk in (await broker.protocol.keys("__fills:*") or []):
-                await broker.protocol.remove(fk)
-            for ok in (await broker.protocol.keys("__orders:*") or []):
-                await broker.protocol.remove(ok)
-            await broker.protocol.remove("__positions")
-            broker._positions = {}
-            exchange = broker.protocol
-            if hasattr(exchange, 'account') and hasattr(exchange, '_initial_balance'):
-                exchange.account = type(exchange.account)(initial_balance=exchange._initial_balance, total=exchange._initial_balance)
-                exchange._pending_orders = []
+        if broker and broker.db:
+            await broker.db.clear("fills")
+            await broker.db.clear("orders")
+            await broker.db.clear("positions")
+            broker.exchange.reset()
+
+    async def on_stop(self):
+        if self.db: await self.db.on_stop()
+        await super().on_stop()

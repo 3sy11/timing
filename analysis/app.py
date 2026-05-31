@@ -3,15 +3,26 @@ import os, logging
 from typing import ClassVar
 from mode.utils.imports import smart_import
 from bollydog.models.service import AppService
-from bollydog.adapters.composite import CacheLayer
-from bollydog.adapters.memory import SQLiteProtocol
 from bollydog.globals import hub
+from timing.adapters.sqlite import TableSchema, StructuredSQLiteProtocol
+from timing.models.checkpoint import Checkpoint
+from timing.models.touch import TouchSignal
+from timing.models.retracement import Retracement
+from timing.models.touch import TouchEntry
 from timing.data.models import GetKlines
 from timing.models.signal import SignalEmitted
 
 log = logging.getLogger(__name__)
 CLOCK_MODULE = os.environ.get("TIMING_CLOCK", "timing.common.clock.LiveClock")
-CACHE_PATH = os.environ.get("TIMING_ANALYSIS_CACHE_PATH", "cache/analysis")
+DATA_ROOT = os.environ.get("TIMING_DATA_ROOT", "warehouse/timing")
+
+ANALYSIS_SCHEMAS = [
+    TableSchema(model=Checkpoint, table="checkpoints", key_columns=["symbol", "interval"]),
+    TableSchema(model=TouchSignal, table="signals", key_columns=["symbol", "interval"],
+                singleton=False, sort_by="ts"),
+    TableSchema(model=Retracement, table="retracements", key_columns=["symbol", "interval"]),
+    TableSchema(model=TouchEntry, table="touches", key_columns=["symbol", "interval", "level_key"]),
+]
 
 
 class AnalysisEngine(AppService, abstract=True):
@@ -26,19 +37,16 @@ class AnalysisEngine(AppService, abstract=True):
         super().__init_subclass__(abstract=abstract, **kwargs)
 
     def __init__(self, cache_path=None, **kwargs):
-        self._cache_path = cache_path or CACHE_PATH
+        self._cache_path = cache_path or DATA_ROOT
         os.makedirs(self._cache_path, exist_ok=True)
+        self.db: StructuredSQLiteProtocol = None
         super().__init__(**kwargs)
 
     async def on_start(self) -> None:
-        if not self.protocol:
-            db_path = os.path.join(self._cache_path, f"{self.alias.lower()}.sqlite")
-            inner = SQLiteProtocol(path=db_path)
-            cache = CacheLayer(flush_threshold=1)
-            cache.add_dependency(inner)
-            self.protocol = cache
-            await cache.maybe_start()
-            log.info(f'[{self.alias}] 协议链就绪: CacheLayer → SQLite({db_path})')
+        db_path = os.path.join(self._cache_path, f"{self.alias.lower()}.sqlite")
+        self.db = StructuredSQLiteProtocol(path=db_path, schemas=ANALYSIS_SCHEMAS)
+        await self.db.on_start()
+        log.info(f'[{self.alias}] DB就绪: {db_path}')
         await super().on_start()
 
     async def on_started(self):
@@ -51,7 +59,8 @@ class AnalysisEngine(AppService, abstract=True):
         interval = getattr(cmd, 'interval', '') or ''
         if not (symbol and interval): return None
 
-        checkpoint_ts = await self.protocol.get(f"__ckpt:{symbol}:{interval}") or 0
+        ckpt = await self.db.get("checkpoints", symbol=symbol, interval=interval)
+        checkpoint_ts = ckpt["ts"] if ckpt else 0
         if checkpoint_ts == 0:
             all_klines = await hub.execute(GetKlines(symbol=symbol, interval=interval))
             if not all_klines: return None
@@ -72,11 +81,10 @@ class AnalysisEngine(AppService, abstract=True):
                 output["breakouts"].extend(bar_result.get("breakouts", []))
                 if bar_result.get("recomputed"): output["recomputed"] = True
 
-        await self.protocol.set(f"__ckpt:{symbol}:{interval}", int(new_bars[-1]["ts"]))
+        await self.db.put("checkpoints", {"symbol": symbol, "interval": interval, "ts": int(new_bars[-1]["ts"])})
         if output["signals"]:
-            existing_signals = await self.protocol.get(f"signals:{symbol}:{interval}") or []
-            existing_signals.extend(output["signals"])
-            await self.protocol.set(f"signals:{symbol}:{interval}", existing_signals)
+            signal_rows = [{"symbol": symbol, "interval": interval, **sig} for sig in output["signals"]]
+            await self.db.append("signals", signal_rows)
 
         for sig in output["signals"]:
             ev = SignalEmitted(
@@ -89,6 +97,10 @@ class AnalysisEngine(AppService, abstract=True):
 
         log.info(f'[{self.alias}] {symbol}/{interval} {len(new_bars)}根bar {len(output["signals"])}个信号')
         return output
+
+    async def on_stop(self):
+        if self.db: await self.db.on_stop()
+        await super().on_stop()
 
     async def _process_bar(self, symbol: str, interval: str, bar: dict) -> dict:
         raise NotImplementedError

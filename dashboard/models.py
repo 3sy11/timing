@@ -30,6 +30,19 @@ class BatchJob(BaseModel):
     created_at: int = Field(default_factory=lambda: int(time.time() * 1000))
 
 
+class RunDetail(BaseModel):
+    run_id: str = ""
+    data: dict = Field(default_factory=dict)
+
+
+class Dataset(BaseModel):
+    symbol: str = ""
+    interval: str = ""
+    count: int = 0
+    filename: str = ""
+    uploaded_at: int = 0
+
+
 class BacktestProgress(BaseEvent):
     destination: ClassVar[str] = "dashboard.DashboardService.BacktestProgress"
     job_id: str = ""

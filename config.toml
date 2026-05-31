@@ -1,9 +1,15 @@
 # timing 主配置文件
 #
 # 启动命令：
-#   生产模式：bollydog service --config config.toml
-#   回测模式：.venv/bin/python3 main.py execute RunBacktest --config config.toml --symbol 159363.OF --interval 1d
-#   导入数据：.venv/bin/python3 main.py execute ImportKlines --config config.toml --path xxx.parquet --symbol 159363.OF --interval 1d
+#   生产模式：python main.py service --config config.toml
+#   回测模式：python main.py execute RunBacktest --config config.toml --symbol 159363.OF --interval 1d
+#   导入数据：python main.py execute ImportKlines --config config.toml --path warehouse/ods/159363.OF.parquet --symbol 159363.OF --interval 1d
+#
+# 数据根目录由 TIMING_DATA_ROOT 环境变量控制（默认 warehouse/timing）
+# 各模块在 on_start 中自建 protocol 链，无需在此声明 protocol 段
+
+# ── HTTP 入口 ──
+["bollydog.entrypoint.http.app.HttpService"]
 
 # ── 生产入口 ──
 ["timing.engine.app.TimingApp"]
@@ -15,50 +21,21 @@ depends = ["data.DataEngine", "strategy.FibStrategy", "execution.Broker"]
 
 # ── 后管服务 ──
 ["timing.dashboard.app.DashboardService"]
-cache_path = "cache/dashboard"
 
 # ── 数据层 ──
 ["timing.data.app.DataEngine"]
-db_path = "cache/data.duckdb"
 
 # ── 分析层 ──
 ["timing.analysis.algo.retracement.service.RetracementService"]
-cache_path = "cache/analysis"
 depends = ["data.DataEngine"]
 subscriber = {"data.DataEngine.PushBars" = "on_bar"}
-
-["timing.analysis.algo.retracement.service.RetracementService".protocol]
-module = "bollydog.adapters.composite.CacheLayer"
-flush_threshold = 1
-
-["timing.analysis.algo.retracement.service.RetracementService".protocol.protocol]
-module = "bollydog.adapters.memory.SQLiteProtocol"
-path = "cache/analysis/retracement.sqlite"
 
 # ── 策略层 ──
 ["timing.strategy.app.FibStrategy"]
 subscriber = {"analysis.AnalysisEngine.SignalEmitted" = "on_signal"}
 
-["timing.strategy.app.FibStrategy".protocol]
-module = "bollydog.adapters.composite.CacheLayer"
-
-["timing.strategy.app.FibStrategy".protocol.protocol]
-module = "bollydog.adapters.memory.SQLiteProtocol"
-path = "cache/strategy/fib_strategy.sqlite"
-
 # ── 执行层 ──
 ["timing.execution.broker.Broker"]
-
-["timing.execution.broker.Broker".protocol]
-module = "timing.execution.adapters.sim.SimExchangeProtocol"
 initial_balance = 100000
 slippage_pct = 0.001
 commission_rate = 0.001
-
-["timing.execution.broker.Broker".protocol.protocol]
-module = "bollydog.adapters.composite.CacheLayer"
-flush_threshold = 1
-
-["timing.execution.broker.Broker".protocol.protocol.protocol]
-module = "bollydog.adapters.memory.SQLiteProtocol"
-path = "cache/execution/broker.sqlite"

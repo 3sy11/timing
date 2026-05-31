@@ -11,9 +11,9 @@ RetracementService — 斐波那契回撤分析子服务。
     1. 检测"触碰" — 价格是否靠近关键回撤位 → 产出信号
     2. 检测"突破" — 价格是否穿过了某组结构 → 重新计算回撤
 
-【缓存说明】
-  "retracement:{symbol}:{interval}"  — 完整的回撤计算结果（含 groups、features）
-  "_touch:{symbol}:{interval}"       — 触碰去重 map（每个 level 的上次触碰时间）
+【存储表】
+  retracements (symbol, interval, data JSON)  — 完整的回撤计算结果
+  touches (symbol, interval, level_key, last_ts)  — 触碰去重
 """
 import logging, math
 from dataclasses import asdict
@@ -33,38 +33,33 @@ _FEATURE_COLS = ["ts", "high", "low", "close", "conf_high", "conf_low"]
 _PASS_KEYS = ("wmap", "legs_found", "legs_kept")
 
 
-# ──────────────── 序列化/反序列化（缓存用） ────────────────
-
 def _df_records(df, cols=None):
-    """DataFrame → list[dict]，NaN 转 None。"""
     if df is None or df.empty: return []
     recs = (df[cols] if cols else df).to_dict("records")
     return [{k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in r.items()} for r in recs]
 
 
 def _serialize(result: dict) -> dict:
-    """把 compute_retracement 的结果转成可 JSON 序列化的 dict（存缓存用）。"""
     out = {"features": _df_records(result.get("feature_df"), _FEATURE_COLS),
            "clusters_high": _df_records(result.get("clusters_high_df")),
            "clusters_low": _df_records(result.get("clusters_low_df")),
            "groups": [{"leg": asdict(g.leg), "levels": g.levels, "score": g.score, "direction": g.direction}
                       for g in result.get("groups", [])]}
-    for k in _PASS_KEYS: out[k] = result.get(k, 0 if k != "wmap" else {})
+    for k in _PASS_KEYS:
+        out[k] = result.get(k, 0 if k != "wmap" else {})
     return out
 
 
 def _deserialize(data: dict) -> dict:
-    """把缓存中的 dict 还原成 compute_retracement 格式的对象。"""
     out = {"feature_df": pd.DataFrame(data.get("features", [])),
            "clusters_high_df": pd.DataFrame(data.get("clusters_high", [])),
            "clusters_low_df": pd.DataFrame(data.get("clusters_low", [])),
            "groups": [FibGroup(leg=TrendLeg(**gd["leg"]), levels=[tuple(lv) for lv in gd["levels"]],
                                score=gd["score"], direction=gd["direction"]) for gd in data.get("groups", [])]}
-    for k in _PASS_KEYS: out[k] = data.get(k, 0 if k != "wmap" else {})
+    for k in _PASS_KEYS:
+        out[k] = data.get(k, 0 if k != "wmap" else {})
     return out
 
-
-# ──────────────── 服务实现 ────────────────
 
 class RetracementService(AnalysisEngine):
     alias = "RetracementService"
@@ -76,41 +71,30 @@ class RetracementService(AnalysisEngine):
 
     @property
     def cfg(self) -> RetracementConfig:
-        """兼容两种 config 来源：TOML create_from 设的 dict / BacktestApp 覆盖的 dict。"""
         if isinstance(self.config, RetracementConfig): return self.config
         return RetracementConfig(**(self.config if isinstance(self.config, dict) else {}))
 
     async def _warmup(self, symbol: str, interval: str, klines: list):
-        """用历史 K 线计算完整的回撤结构并缓存。"""
         result = compute_retracement(klines, self.cfg)
-        await self.protocol.set(f"retracement:{symbol}:{interval}", _serialize(result))
+        await self.db.put("retracements", {"symbol": symbol, "interval": interval, "data": _serialize(result)})
         log.info(f'[回撤分析] 预热完成 {symbol}/{interval} {len(klines)}根K线 → {len(result.get("groups", []))}组结构')
 
     async def _process_bar(self, symbol: str, interval: str, bar: dict) -> dict:
-        """
-        处理单根 bar：
-        1. 读缓存的回撤结构
-        2. 检测是否触碰关键位 → 产出信号
-        3. 检测是否突破结构 → 重新计算
-        """
         close = float(bar.get("close", 0))
         if not close: return {"signals": [], "breakouts": [], "recomputed": False}
         cfg = self.cfg
-        cache_key = f"retracement:{symbol}:{interval}"
 
-        # ① 从缓存读取之前计算好的回撤结构
-        raw = await self.protocol.get(cache_key)
-        cache = _deserialize(raw) if raw else None
+        raw = await self.db.get("retracements", symbol=symbol, interval=interval)
+        cache = _deserialize(raw["data"]) if raw else None
         groups = cache.get("groups", []) if cache else []
 
-        # ② 检测触碰：价格是否靠近某个关键回撤位
         now = self.clock.now_sec()
-        touch_key = f"_touch:{symbol}:{interval}"
-        touch_map = await self.protocol.get(touch_key) or {}
+        touch_rows = await self.db.get("touches", symbol=symbol, interval=interval)
+        touch_map = {t["level_key"]: t["last_ts"] for t in touch_rows}
+
         consensus = compute_consensus_strength(close, groups, cfg=cfg)
         signals = []
         for hit in consensus["hits"]:
-            # cooldown 去重：同一个 level 短时间内不重复发信号
             tk = f"{hit['ratio']}:{hit['level_price']}"
             if now - touch_map.get(tk, 0) < cfg.touch_cooldown_sec: continue
             touch_map[tk] = now
@@ -118,9 +102,10 @@ class RetracementService(AnalysisEngine):
                             "touch_price": close, "direction": hit["direction"], "group_idx": hit["group_idx"],
                             "strength": consensus["strength"]})
         if signals:
-            await self.protocol.set(touch_key, touch_map)
+            touch_entries = [{"symbol": symbol, "interval": interval, "level_key": k, "last_ts": v}
+                            for k, v in touch_map.items()]
+            await self.db.put("touches", touch_entries, symbol=symbol, interval=interval)
 
-        # ③ 检测突破：价格穿过了某组结构的边界 → 该组失效，需要重算
         broken = check_breakout(close, groups, cfg=cfg)
         recomputed = False
         if broken:
@@ -129,9 +114,9 @@ class RetracementService(AnalysisEngine):
             klines = await hub.execute(GetKlines(symbol=symbol, interval=interval))
             if klines:
                 new_result = compute_retracement(klines, cfg)
-                await self.protocol.set(cache_key, _serialize(new_result))
+                await self.db.put("retracements", {"symbol": symbol, "interval": interval, "data": _serialize(new_result)})
                 recomputed = True
             elif cache:
-                await self.protocol.set(cache_key, _serialize(cache))
+                await self.db.put("retracements", {"symbol": symbol, "interval": interval, "data": _serialize(cache)})
 
         return {"signals": signals, "breakouts": broken, "recomputed": recomputed}

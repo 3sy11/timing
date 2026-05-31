@@ -4,7 +4,7 @@ from typing import Any, ClassVar
 from pydantic import Field
 from bollydog.globals import app, hub
 from bollydog.models.base import BaseCommand
-from .models import BacktestRun, BatchJob, BacktestProgress
+from .models import BatchJob, BacktestProgress
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +19,10 @@ class GetStatus(BaseCommand):
             services.append({"alias": getattr(svc, 'alias', name), "domain": getattr(svc, 'domain', ''),
                              "running": svc._started.is_set() if hasattr(svc, '_started') else False})
         svc = _get_dashboard()
-        current_job = await svc.protocol.get("__current_job") if svc and svc.protocol else None
+        current_job = None
+        if svc and svc.db:
+            jobs = await svc.db.all("jobs")
+            current_job = next((j for j in reversed(jobs) if j["status"] == "running"), None)
         return {"services": services, "current_job": current_job}
 
 
@@ -30,8 +33,8 @@ class ListRuns(BaseCommand):
 
     async def __call__(self, *args, **kwargs) -> Any:
         svc = _get_dashboard()
-        if not svc or not svc.protocol: return {"runs": [], "total": 0}
-        all_runs = await svc.protocol.get("__runs") or []
+        if not svc or not svc.db: return {"runs": [], "total": 0}
+        all_runs = await svc.db.all("runs")
         all_runs.sort(key=lambda r: r.get("created_at", 0), reverse=True)
         return {"runs": all_runs[self.offset:self.offset + self.limit], "total": len(all_runs)}
 
@@ -42,8 +45,8 @@ class GetRun(BaseCommand):
 
     async def __call__(self, *args, **kwargs) -> Any:
         svc = _get_dashboard()
-        if not svc or not svc.protocol: return None
-        return await svc.protocol.get(f"__run_detail:{self.run_id}")
+        if not svc or not svc.db: return None
+        return await svc.db.get("run_details", run_id=self.run_id)
 
 
 class StartBatch(BaseCommand):
@@ -56,13 +59,10 @@ class StartBatch(BaseCommand):
     async def __call__(self, *args, **kwargs) -> Any:
         svc = _get_dashboard()
         if not svc: return {"error": "DashboardService not found"}
-
         job = BatchJob(symbol=self.symbol, interval=self.interval,
                        warmup_bars=self.warmup_bars, param_grid=self.param_grid)
-        await svc.protocol.set("__current_job", job.model_dump())
+        await svc.db.put("jobs", job.model_dump(), job_id=job.job_id)
         log.info(f'[Dashboard] 启动批量回测 job={job.job_id} {self.symbol}/{self.interval}')
-
-        # 异步执行，不阻塞返回
         asyncio.ensure_future(svc.run_batch_job(job))
         return {"job_id": job.job_id, "status": "started"}
 
@@ -71,9 +71,9 @@ class ListDatasets(BaseCommand):
     destination: ClassVar[str] = "dashboard.DashboardService.ListDatasets"
 
     async def __call__(self, *args, **kwargs) -> Any:
-        from timing.data.models import GetKlines
         svc = _get_dashboard()
-        datasets = await svc.protocol.get("__datasets") or [] if svc and svc.protocol else []
+        if not svc or not svc.db: return {"datasets": []}
+        datasets = await svc.db.all("datasets")
         return {"datasets": datasets}
 
 
@@ -81,7 +81,7 @@ class UploadData(BaseCommand):
     destination: ClassVar[str] = "dashboard.DashboardService.UploadData"
     symbol: str = ""
     interval: str = ""
-    file: dict = Field(default_factory=dict)  # {file: bytes, filename: str, ...}
+    file: dict = Field(default_factory=dict)
 
     async def __call__(self, *args, **kwargs) -> Any:
         if not self.file or not self.file.get("file"):
@@ -101,14 +101,12 @@ class UploadData(BaseCommand):
         data_svc = next((s for s in DataEngine._apps.values() if isinstance(s, DataEngine)), None)
         if data_svc:
             await data_svc.set_klines(self.symbol, self.interval, klines)
-        # 记录 dataset
         svc = _get_dashboard()
-        if svc and svc.protocol:
-            datasets = await svc.protocol.get("__datasets") or []
-            datasets.append({"symbol": self.symbol, "interval": self.interval,
-                             "count": len(klines), "filename": self.file.get("filename", ""),
-                             "uploaded_at": int(time.time() * 1000)})
-            await svc.protocol.set("__datasets", datasets)
+        if svc and svc.db:
+            await svc.db.put("datasets", {"symbol": self.symbol, "interval": self.interval,
+                                          "count": len(klines), "filename": self.file.get("filename", ""),
+                                          "uploaded_at": int(time.time() * 1000)},
+                             symbol=self.symbol, interval=self.interval)
         log.info(f'[Dashboard] 数据导入 {self.symbol}/{self.interval} {len(klines)}条')
         return {"symbol": self.symbol, "interval": self.interval, "count": len(klines)}
 

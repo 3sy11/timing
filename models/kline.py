@@ -1,4 +1,4 @@
-"""Kline 数据模型 + TableCacheLayer schema 推导。"""
+"""Kline 数据模型。"""
 from pydantic import BaseModel
 
 _TYPE_MAP = {float: 'DOUBLE', int: 'BIGINT', str: 'VARCHAR'}

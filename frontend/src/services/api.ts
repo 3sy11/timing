@@ -2,7 +2,10 @@ const BASE = ''
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`)
-  return res.json()
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+  const text = await res.text()
+  if (!text) throw new Error('响应为空，后端可能未启动')
+  return JSON.parse(text)
 }
 
 export interface Kline { ts: number; open: number; high: number; low: number; close: number; volume: number }

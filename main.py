@@ -1,4 +1,6 @@
-import sys
+import os, sys
+os.environ.setdefault("TIMING_DATA_ROOT", "warehouse/timing")
+
 from pathlib import Path
 _root = Path(__file__).resolve().parent.parent
 if str(_root) not in sys.path:

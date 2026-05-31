@@ -4,7 +4,7 @@ from mode.utils.imports import smart_import
 from bollydog.models.service import AppService
 from bollydog.globals import hub
 from bollydog.service.exchange import _make_callback
-from timing.analysis.app import AnalysisEngine, CACHE_PATH
+from timing.analysis.app import AnalysisEngine, DATA_ROOT
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class BacktestApp(AppService):
             base_cls = smart_import(svc_conf["module"])
             alias = f'{base_cls.alias}_{i}'
             svc_cls = type(alias, (base_cls,), {'alias': alias})
-            svc = svc_cls(cache_path=svc_conf.get("cache_path", f'{CACHE_PATH}/{alias}'))
+            svc = svc_cls(cache_path=svc_conf.get("cache_path", f'{DATA_ROOT}/{alias}'))
             if svc_conf.get("config"):
                 if isinstance(svc.config, dict): svc.config.update(svc_conf["config"])
                 else: svc.config = svc_conf["config"]

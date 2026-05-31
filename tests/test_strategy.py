@@ -1,4 +1,4 @@
-"""Layer 3: FibStrategy 行为测试 — mock protocol + hub。"""
+"""Layer 3: FibStrategy 行为测试 — mock db + hub。"""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from timing.strategy.app import FibStrategy
@@ -9,9 +9,9 @@ def _make_strategy():
     svc = FibStrategy.__new__(FibStrategy)
     svc.position_size = 0.1
     svc.min_strength = 0.6
-    svc.protocol = AsyncMock()
-    svc.protocol.get = AsyncMock(return_value=[])
-    svc.protocol.set = AsyncMock()
+    svc.db = AsyncMock()
+    svc.db.append = AsyncMock()
+    svc.db.get = AsyncMock(return_value=[])
     return svc
 
 
@@ -31,9 +31,9 @@ async def test_strong_signal_submits_order():
     with patch("timing.strategy.app.hub") as mock_hub:
         mock_hub.execute = AsyncMock()
         await svc.on_signal(cmd)
-    svc.protocol.set.assert_called()
-    decisions = svc.protocol.set.call_args[0][1]
-    assert len(decisions) == 1 and decisions[0]["action"] == "submit"
+    svc.db.append.assert_called()
+    call_data = svc.db.append.call_args[0][1]
+    assert call_data["action"] == "submit"
     mock_hub.execute.assert_called_once()
 
 
@@ -43,8 +43,8 @@ async def test_weak_signal_skips():
     with patch("timing.strategy.app.hub") as mock_hub:
         mock_hub.execute = AsyncMock()
         await svc.on_signal(cmd)
-    decisions = svc.protocol.set.call_args[0][1]
-    assert decisions[0]["action"] == "skip" and "strength" in decisions[0]["reason"]
+    call_data = svc.db.append.call_args[0][1]
+    assert call_data["action"] == "skip" and "strength" in call_data["reason"]
     mock_hub.execute.assert_not_called()
 
 
@@ -54,8 +54,8 @@ async def test_neutral_skips():
     with patch("timing.strategy.app.hub") as mock_hub:
         mock_hub.execute = AsyncMock()
         await svc.on_signal(cmd)
-    decisions = svc.protocol.set.call_args[0][1]
-    assert decisions[0]["action"] == "skip" and "neutral" in decisions[0]["reason"]
+    call_data = svc.db.append.call_args[0][1]
+    assert call_data["action"] == "skip" and "neutral" in call_data["reason"]
 
 
 def test_decision_model_frozen():

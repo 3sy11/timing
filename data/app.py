@@ -5,7 +5,8 @@ from bollydog.models.service import AppService
 from timing.models.kline import kline_ddl, KEY_COLUMNS, VALUE_COLUMNS, ALL_COLUMNS
 
 log = logging.getLogger(__name__)
-DEFAULT_DB_PATH = os.environ.get("TIMING_DATA_DB_PATH", "cache/data.duckdb")
+DATA_ROOT = os.environ.get("TIMING_DATA_ROOT", "warehouse/timing")
+DEFAULT_DB_PATH = os.path.join(DATA_ROOT, "klines.duckdb")
 
 
 class DataEngine(AppService):

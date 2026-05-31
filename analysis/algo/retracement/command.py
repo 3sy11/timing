@@ -8,7 +8,7 @@ log = logging.getLogger(__name__)
 
 
 class ComputeRetracement(BaseCommand):
-    """compute_retracement → set_cache。klines 可外部传入，缺省从 DataEngine 取。"""
+    """compute_retracement → 存入 retracements 表。"""
     destination: ClassVar[str] = "analysis.RetracementService.ComputeRetracement"
     symbol: str = ""
     interval: str = ""
@@ -20,13 +20,13 @@ class ComputeRetracement(BaseCommand):
         klines = self.klines
         if not klines:
             from timing.data.models import GetKlines
-            get_cmd = GetKlines(symbol=self.symbol, interval=self.interval)
-            klines = await hub.execute(get_cmd)
+            klines = await hub.execute(GetKlines(symbol=self.symbol, interval=self.interval))
         if not klines:
             log.warning(f'[Retracement] ComputeRetracement: no klines for {self.symbol}/{self.interval}'); return None
         from .algo import compute_retracement
-        result = compute_retracement(klines, svc.config)
-        await svc.set_cache(self.symbol, self.interval, result)
+        from .service import _serialize
+        result = compute_retracement(klines, svc.cfg)
+        await svc.db.put("retracements", {"symbol": self.symbol, "interval": self.interval, "data": _serialize(result)})
         groups = result.get("groups", [])
         log.info(f'[Retracement] ComputeRetracement {self.symbol}/{self.interval} klines={len(klines)} groups={len(groups)}')
         return {"symbol": self.symbol, "interval": self.interval, "klines": len(klines),
@@ -39,5 +39,5 @@ class GetSignals(BaseCommand):
     interval: str = ""
 
     async def __call__(self, *args, **kwargs) -> Any:
-        if not app.protocol: return []
-        return await app.protocol.get(f"signals:{self.symbol}:{self.interval}") or []
+        if not app.db: return []
+        return await app.db.get("signals", symbol=self.symbol, interval=self.interval) or []
