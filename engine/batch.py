@@ -6,7 +6,6 @@ from bollydog.models.base import BaseCommand
 from timing.analysis.app import AnalysisEngine
 from timing.strategy.app import FibStrategy
 from timing.engine.command import RunBacktest
-from timing.dashboard.models import BacktestProgress
 from timing.common.metrics import compute_metrics
 
 log = logging.getLogger(__name__)
@@ -39,52 +38,29 @@ class BatchBacktest(BaseCommand):
 
         for idx, combo in enumerate(combos):
             log.info(f'[批量回测] [{idx+1}/{len(combos)}] 参数={combo}')
-
             analysis_params = {k: v for k, v in combo.items() if k not in strategy_keys}
             strategy_params = {k: v for k, v in combo.items() if k in strategy_keys}
             for svc in AnalysisEngine._services.values():
                 if analysis_params:
-                    if isinstance(svc.config, dict): svc.config.update(analysis_params)
-                    else: svc.config = analysis_params
+                    if isinstance(svc.config, dict):
+                        svc.config.update(analysis_params)
+                    else:
+                        svc.config = analysis_params
             for svc in FibStrategy._apps.values():
-                if "position_size" in strategy_params: svc.position_size = strategy_params["position_size"]
-                if "min_strength" in strategy_params: svc.min_strength = strategy_params["min_strength"]
-
-            await self._reset_state(symbol, interval)
-            await hub.dispatch(BacktestProgress(job_id="cli", run_index=idx, total_runs=len(combos), status="running", params=combo))
+                if "position_size" in strategy_params:
+                    svc.position_size = strategy_params["position_size"]
+                if "min_strength" in strategy_params:
+                    svc.min_strength = strategy_params["min_strength"]
 
             result = await hub.execute(RunBacktest(symbol=symbol, interval=interval, warmup_bars=self.warmup_bars))
             metrics = {}
             if result:
-                fills = result.get("fills", [])
+                fills_count = result.get("fills_count", 0)
                 account = result.get("account", {})
                 initial = account.get("initial_balance", 100000)
-                metrics = compute_metrics(fills, initial, account.get("total", initial))
-                metrics.pop("equity_curve", None)
+                metrics = compute_metrics([], initial, account.get("total", initial))
             results.append({"params": combo, "result": result, "metrics": metrics})
-
-            await hub.dispatch(BacktestProgress(job_id="cli", run_index=idx, total_runs=len(combos),
-                                                status="completed" if result else "failed", params=combo, metrics=metrics))
-            log.info(f'[批量回测] [{idx+1}/{len(combos)}] 完成 成交={len(result.get("fills", [])) if result else 0}')
+            log.info(f'[批量回测] [{idx+1}/{len(combos)}] 完成 run_id={result.get("run_id") if result else "N/A"}')
 
         log.info(f'[批量回测] 全部完成 {len(results)}组')
         return results
-
-    async def _reset_state(self, symbol: str, interval: str):
-        for svc in AnalysisEngine._services.values():
-            if not svc.db: continue
-            await svc.db.delete("checkpoints", symbol=symbol, interval=interval)
-            await svc.db.delete("signals", symbol=symbol, interval=interval)
-            await svc.db.delete("touches", symbol=symbol, interval=interval)
-            await svc.db.delete("retracements", symbol=symbol, interval=interval)
-
-        for svc in FibStrategy._apps.values():
-            if hasattr(svc, 'db') and svc.db:
-                await svc.db.delete("decisions", symbol=symbol)
-
-        broker = next((s for s in (app._children or []) if getattr(s, 'alias', '') == 'Broker'), None)
-        if broker and broker.db:
-            await broker.db.clear("fills")
-            await broker.db.clear("orders")
-            await broker.db.clear("positions")
-            broker.exchange.reset()

@@ -19,10 +19,8 @@
 ├── retracementservice.sqlite              ├── runs         (运行元数据)
 ├── fib_strategy.sqlite                    ├── klines       (K 线)
 ├── execution_broker.sqlite                ├── indicators   (预计算指标)
-└── dashboard.sqlite                       ├── checkpoints  (分析进度)
-                                           ├── signals      (信号)
-                                           ├── touches      (触碰)
-                                           ├── analysis     (分析结果: retracement/...)
+└── dashboard.sqlite                       ├── signals      (分析信号输出)
+                                           ├── analysis     (分析状态: checkpoint/retracement/...)
                                            ├── decisions    (策略决策)
                                            ├── orders       (订单)
                                            ├── fills        (成交)
@@ -36,7 +34,7 @@
   indicators   ← 从 klines 计算的技术指标，参数固定时全局共用
 
 带 run_id（每次运行的独立产出）:
-  signals, decisions, orders, fills, positions, checkpoints, analysis
+  signals, analysis, decisions, orders, fills, positions
 
   run_id = "live_20260602_1"    ← 当前生产运行
   run_id = "bt_a3f2c1"         ← 一次回测
@@ -55,17 +53,20 @@
 parquet
   │ [IngestKlinesFromFile]
   ▼
-klines (symbol, interval, ts, open, high, low, close, volume)  ← 无 run_id，全局共享
+klines (symbol, interval, ts, ohlcv)           ← 无 run_id，全局共享
   │ [ComputeIndicators]
   ▼
-indicators (symbol, interval, ts, sma_20, rsi_14, macd ...)    ← 无 run_id，全局共享
+indicators (symbol, interval, ts, sma/rsi/...) ← 无 run_id，全局共享
   │ [RunBacktest / 生产 on_bar]
   ▼
+analysis (run_id, name=checkpoint/retracement)  ← 算法内部状态 + 增量游标
+  │
+  ▼ [算法产出]
 signals → decisions → orders → fills → positions
-  (全部带 run_id, 同一张表, 同一个库)
+  (全部带 run_id, 同一个库)
   │
   ▼ [Grafana 直连 DuckDB]
-Dashboard: 变量 $run_id, $symbol, $interval 筛选一切
+Dashboard: 变量 $run_id, $symbol, $interval 筛选
 ```
 
 ---
@@ -76,7 +77,7 @@ Dashboard: 变量 $run_id, $symbol, $interval 筛选一切
 
 - [ ] 定义所有表结构（字段、类型、主键）
 - [ ] 定义指标计算规则（talib 函数映射）
-- [ ] 定义聚合度量（Grafana/AI 用）
+- [ ] 定义聚合度量（仅 positions.win_rate / total_pnl）
 
 ```yaml
 # timing/schema/registry.yml
@@ -120,20 +121,6 @@ cubes:
       - name: volume
         sql: volume
         type: number
-
-    measures:
-      - name: avg_close
-        sql: close
-        type: avg
-      - name: max_high
-        sql: high
-        type: max
-      - name: min_low
-        sql: low
-        type: min
-      - name: total_volume
-        sql: volume
-        type: sum
 
   - name: indicators
     description: "预计算技术指标（全局共享，不含 run_id）"
@@ -239,32 +226,8 @@ cubes:
         sql: params
         type: string   # JSON
 
-    measures:
-      - name: count
-        type: count
-
-  - name: checkpoints
-    description: "分析进度"
-    sql_table: checkpoints
-    x-storage:
-      primary_key: [run_id, symbol, interval]
-
-    dimensions:
-      - name: run_id
-        sql: run_id
-        type: string
-      - name: symbol
-        sql: symbol
-        type: string
-      - name: interval
-        sql: interval
-        type: string
-      - name: ts
-        sql: ts
-        type: number
-
   - name: signals
-    description: "分析信号"
+    description: "分析信号（所有算法的最终输出）"
     sql_table: signals
     x-storage:
       primary_key: [run_id, symbol, interval, ts, source]
@@ -301,47 +264,8 @@ cubes:
         sql: metadata
         type: string   # JSON
 
-    measures:
-      - name: count
-        type: count
-
-  - name: touches
-    description: "触碰记录"
-    sql_table: touches
-    x-storage:
-      primary_key: [run_id, symbol, interval, level_key]
-
-    dimensions:
-      - name: run_id
-        sql: run_id
-        type: string
-      - name: symbol
-        sql: symbol
-        type: string
-      - name: interval
-        sql: interval
-        type: string
-      - name: level_key
-        sql: level_key
-        type: string
-      - name: ts
-        sql: ts
-        type: number
-      - name: touch_price
-        sql: touch_price
-        type: number
-      - name: level_price
-        sql: level_price
-        type: number
-      - name: direction
-        sql: direction
-        type: string
-      - name: touch_count
-        sql: touch_count
-        type: number
-
   - name: analysis
-    description: "分析结果（通用表，name 区分不同算法：retracement / elliott / harmonic ...）"
+    description: "分析状态（通用表：算法中间状态 + 增量游标，name 区分用途）"
     sql_table: analysis
     x-storage:
       primary_key: [run_id, symbol, interval, name]
@@ -358,17 +282,13 @@ cubes:
         type: string
       - name: name
         sql: name
-        type: string   # retracement | elliott | harmonic | ...
+        type: string   # checkpoint | retracement | elliott | ...
       - name: ts
         sql: ts
-        type: number   # 最近一次计算时间
+        type: number   # 最近一次更新时间
       - name: data
         sql: data
         type: string   # JSON blob: 各算法自定义结构
-
-    measures:
-      - name: count
-        type: count
 
   - name: decisions
     description: "策略决策"
@@ -453,13 +373,6 @@ cubes:
         sql: filled_at
         type: number
 
-    measures:
-      - name: count
-        type: count
-      - name: total_commission
-        sql: commission
-        type: sum
-
   - name: fills
     description: "成交记录"
     sql_table: fills
@@ -527,84 +440,7 @@ cubes:
         type: sum
 ```
 
-### 1.2 创建 `timing/schema/engine.py`
-
-- [ ] 解析 Cube 兼容 YAML（cubes → dimensions/measures + x-storage）
-- [ ] 从 YAML 生成 DDL（CREATE TABLE）
-- [ ] 从 YAML 生成 INSERT OR REPLACE 语句模板
-- [ ] 从 x-storage.compute 生成指标计算 SQL
-- [ ] 提供 `get_columns(table)` / `get_primary_key(table)` 等查询方法
-
-```python
-# timing/schema/engine.py
-import yaml, os
-
-# Cube dimension type → DuckDB 列类型
-_TYPE_MAP = {"string": "VARCHAR", "number": "DOUBLE", "time": "BIGINT", "boolean": "BOOLEAN"}
-
-class SchemaEngine:
-    def __init__(self, registry_path: str = None):
-        path = registry_path or os.path.join(os.path.dirname(__file__), "registry.yml")
-        with open(path) as f:
-            raw = yaml.safe_load(f)
-        # 建立 name → cube 映射
-        self._cubes = {c["name"]: c for c in raw["cubes"]}
-
-    def tables(self) -> list[str]:
-        return list(self._cubes.keys())
-
-    def cube(self, name: str) -> dict:
-        return self._cubes[name]
-
-    def columns(self, table: str) -> list[str]:
-        return [d["name"] for d in self._cubes[table]["dimensions"]]
-
-    def primary_key(self, table: str) -> list[str]:
-        return self._cubes[table].get("x-storage", {}).get("primary_key", [])
-
-    def ddl(self, table: str) -> str:
-        c = self._cubes[table]
-        cols = [f'"{d["name"]}" {_TYPE_MAP.get(d["type"], "VARCHAR")}' for d in c["dimensions"]]
-        sql = f'CREATE TABLE IF NOT EXISTS {table} ({", ".join(cols)}'
-        pk = self.primary_key(table)
-        if pk:
-            sql += f', PRIMARY KEY ({", ".join(pk)})'
-        return sql + ")"
-
-    def all_ddl(self) -> list[str]:
-        return [self.ddl(t) for t in self.tables()]
-
-    def insert_sql(self, table: str) -> str:
-        cols = self.columns(table)
-        col_str = ", ".join(f'"{c}"' for c in cols)
-        placeholders = ", ".join(["?"] * len(cols))
-        return f'INSERT OR REPLACE INTO {table} ({col_str}) VALUES ({placeholders})'
-
-    def indicators_sql(self, symbol: str, interval: str) -> str:
-        """生成完整的指标预计算 SQL（从 klines → indicators，无 run_id）"""
-        compute = self._cubes["indicators"].get("x-storage", {}).get("compute", {})
-        parts = ["symbol", '"interval"', "ts"]
-        for col_name, spec in compute.get("window", {}).items():
-            fn, args = spec["fn"], spec["args"]
-            arg_str = ", ".join(str(a) for a in args)
-            parts.append(f'{fn}({arg_str}) OVER (PARTITION BY symbol ORDER BY ts) AS {col_name}')
-        for col_name, spec in compute.get("multi_output", {}).items():
-            for out in spec["outputs"]:
-                parts.append(f'NULL AS {out}')
-        select = ", ".join(parts)
-        return f"""INSERT OR REPLACE INTO indicators SELECT {select}
-FROM klines WHERE symbol='{symbol}' AND "interval"='{interval}'"""
-
-    def measure_sql(self, cube_name: str, measure_name: str, **filters) -> str:
-        c = self._cubes[cube_name]
-        m = next(m for m in c.get("measures", []) if m["name"] == measure_name)
-        table = c["sql_table"]
-        where_parts = [f"{k} = '{v}'" for k, v in filters.items()]
-        where_str = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
-        return f'SELECT {m["sql"]} AS value FROM {table}{where_str}'
-```
-
-### 1.3 模型处理（全部消除独立 Pydantic 模型）
+### 1.2 模型处理（全部消除独立 Pydantic 模型）
 
 **原则：数据结构由 YAML 定义，业务逻辑归属 Service，数据用 dict 流转。**
 
@@ -627,7 +463,7 @@ timing/models/
 ```
 旧: Position(BaseModel).apply_fill(fill)     → 新: Broker._apply_fill(pos_dict, fill_dict) -> dict
 旧: Order(BaseModel).mark_filled(price, qty)  → 新: Broker._mark_order_filled(order_dict, ...) -> dict
-旧: Kline(BaseModel).ddl()                    → 新: SchemaEngine.ddl("klines")
+旧: Kline(BaseModel).ddl()                    → 新: Protocol.ddl("klines") (从 YAML 推导)
 旧: Signal(BaseModel)                         → 新: 直接用 dict，结构由 YAML 定义
 ```
 
@@ -636,110 +472,132 @@ Event 类只用于 Hub 事件分发，携带必要字段即可。
 
 ---
 
-## 二、DuckDB 统一 Protocol
+## 二、DuckDB 统一 Protocol（内置 Schema 能力）
 
 ### 2.1 创建 `timing/adapters/duckdb.py`
 
-- [ ] **继承 bollydog 的 `DuckDBProtocol`**（已有 on_start/on_stop/execute_raw/add/list 等基础能力）
-- [ ] 扩展 Schema 驱动能力：自动建表、类型化 put/get/append
+> **设计决策：** 不再有独立的 `SchemaEngine` 类。YAML 解析、DDL 生成、指标 SQL 生成
+> 全部集成在 Protocol 内部 — 与 `StructuredSQLiteProtocol` 从 Pydantic 推导 DDL 的模式一致，
+> 只是数据来源从 Pydantic model 换成了 YAML 文件。
+
+- [ ] **继承 bollydog 的 `DuckDBProtocol`**（复用 on_start/on_stop/execute_raw/_run）
+- [ ] 构造时加载 `registry.yml`，解析 cubes → 内部 schema 映射
+- [ ] on_start 自动建表 + 加载 talib
 - [ ] API 兼容旧 `StructuredSQLiteProtocol`：`get() / put() / append() / delete() / all()`
-- [ ] 单例共享：所有服务用同一个 Protocol 实例
+- [ ] 提供 `indicators_sql()` / `columns()` / `primary_key()` 等 schema 查询方法
 
 ```python
 # timing/adapters/duckdb.py
-import json, logging
+import json, yaml, os, logging
 from bollydog.adapters.sqlalchemy import DuckDBProtocol as BaseDuckDBProtocol
-from timing.schema.engine import SchemaEngine
 
 log = logging.getLogger(__name__)
+_TYPE_MAP = {"string": "VARCHAR", "number": "DOUBLE", "time": "BIGINT", "boolean": "BOOLEAN"}
+_JSON_COLS = ("data", "metadata", "params")
+
 
 class TimingDuckDBProtocol(BaseDuckDBProtocol):
-    """继承 bollydog DuckDBProtocol，扩展 Schema 驱动能力。
+    """YAML-Schema 驱动的 DuckDB Protocol。
 
-    bollydog 基类提供:
-      - on_start(): duckdb.connect + dialect 加载
-      - on_stop(): close
-      - execute_raw(sql): 裸 SQL
-      - adapter: duckdb connection
-      - _run(fn, *a): asyncio.to_thread 包装
-
-    本类扩展:
-      - Schema 驱动自动建表
-      - 类型化 CRUD (put/get/append/delete/all)
-      - talib 扩展加载
-      - JSON 列自动编解码
+    继承 bollydog DuckDBProtocol（提供 duckdb.connect / _run / execute_raw / on_stop）。
+    内置 registry.yml 解析，取代独立 SchemaEngine。
     """
 
-    def __init__(self, url: str, schema: SchemaEngine = None, **kwargs):
+    def __init__(self, url: str, registry_path: str = None, **kwargs):
         super().__init__(url=url, **kwargs)
-        self._schema = schema or SchemaEngine()
+        path = registry_path or os.path.join(os.path.dirname(__file__), "..", "schema", "registry.yml")
+        with open(path) as f:
+            self._cubes = {c["name"]: c for c in yaml.safe_load(f)["cubes"]}
+
+    # ── schema 查询 ──
+
+    def tables(self) -> list[str]:
+        return list(self._cubes.keys())
+
+    def columns(self, table: str) -> list[str]:
+        return [d["name"] for d in self._cubes[table]["dimensions"]]
+
+    def primary_key(self, table: str) -> list[str]:
+        return self._cubes[table].get("x-storage", {}).get("primary_key", [])
+
+    def ddl(self, table: str) -> str:
+        c = self._cubes[table]
+        cols = [f'"{d["name"]}" {_TYPE_MAP.get(d["type"], "VARCHAR")}' for d in c["dimensions"]]
+        sql = f'CREATE TABLE IF NOT EXISTS {table} ({", ".join(cols)}'
+        pk = self.primary_key(table)
+        if pk: sql += f', PRIMARY KEY ({", ".join(pk)})'
+        return sql + ")"
+
+    def indicators_sql(self, symbol: str, interval: str) -> str:
+        compute = self._cubes["indicators"].get("x-storage", {}).get("compute", {})
+        parts = ["symbol", '"interval"', "ts"]
+        for col, spec in compute.get("window", {}).items():
+            arg_str = ", ".join(str(a) for a in spec["args"])
+            parts.append(f'{spec["fn"]}({arg_str}) OVER (PARTITION BY symbol ORDER BY ts) AS {col}')
+        for _, spec in compute.get("multi_output", {}).items():
+            for out in spec["outputs"]:
+                parts.append(f'NULL AS {out}')
+        return f"""INSERT OR REPLACE INTO indicators SELECT {", ".join(parts)}
+FROM klines WHERE symbol='{symbol}' AND "interval"='{interval}'"""
+
+    # ── lifecycle ──
 
     async def on_start(self) -> None:
-        await super().on_start()  # duckdb.connect + dialect
+        await super().on_start()
         self.adapter.execute("INSTALL talib FROM community")
         self.adapter.execute("LOAD talib")
-        for ddl in self._schema.all_ddl():
-            self.adapter.execute(ddl)
-        log.info(f'[TimingDuckDB] 就绪: {self.url}, tables={self._schema.tables()}')
+        for t in self.tables():
+            self.adapter.execute(self.ddl(t))
+        log.info(f'[TimingDuckDB] ready: {self.url}, tables={self.tables()}')
 
-    @property
-    def schema(self) -> SchemaEngine:
-        return self._schema
+    # ── CRUD (兼容 StructuredSQLiteProtocol 接口) ──
 
     async def get(self, table: str = None, **where) -> dict | list[dict]:
-        pk = self._schema.primary_key(table)
-        cols = self._schema.columns(table)
-        sql = f'SELECT * FROM {table}'
-        params = []
+        pk, cols = self.primary_key(table), self.columns(table)
+        sql, params = f'SELECT * FROM {table}', []
         if where:
-            conds = [f'"{k}"=?' for k in where]
-            sql += f' WHERE {" AND ".join(conds)}'
+            sql += f' WHERE {" AND ".join(f"{k}=?" for k in where)}'
             params = list(where.values())
-        result = await self._run(lambda: self.adapter.execute(sql, params).fetchall())
-        rows = [dict(zip(cols, r)) for r in result]
-        for row in rows: self._decode_json(table, row)
-        if pk and set(where.keys()) >= set(pk):
-            return rows[0] if rows else None
-        return rows
+        rows = [dict(zip(cols, r)) for r in
+                await self._run(lambda: self.adapter.execute(sql, params).fetchall())]
+        for row in rows: self._decode_json(row)
+        return (rows[0] if rows else None) if (pk and set(where.keys()) >= set(pk)) else rows
 
     async def put(self, table: str, data: dict, **_):
-        cols = self._schema.columns(table)
-        values = [self._encode(table, c, data.get(c)) for c in cols]
+        cols = self.columns(table)
+        values = [self._encode(c, data.get(c)) for c in cols]
         col_str = ", ".join(f'"{c}"' for c in cols)
-        placeholders = ", ".join(["?"] * len(cols))
-        await self._run(lambda: self.adapter.execute(
-            f'INSERT OR REPLACE INTO {table} ({col_str}) VALUES ({placeholders})', values))
+        ph = ", ".join(["?"] * len(cols))
+        await self._run(lambda: self.adapter.execute(f'INSERT OR REPLACE INTO {table} ({col_str}) VALUES ({ph})', values))
 
     async def append(self, table: str, data):
         rows = data if isinstance(data, list) else [data]
-        cols = self._schema.columns(table)
+        cols = self.columns(table)
         col_str = ", ".join(f'"{c}"' for c in cols)
-        placeholders = ", ".join(["?"] * len(cols))
+        ph = ", ".join(["?"] * len(cols))
         for row in rows:
-            values = [self._encode(table, c, row.get(c)) for c in cols]
-            await self._run(lambda v=values: self.adapter.execute(
-                f'INSERT INTO {table} ({col_str}) VALUES ({placeholders})', v))
+            v = [self._encode(c, row.get(c)) for c in cols]
+            await self._run(lambda v=v: self.adapter.execute(f'INSERT INTO {table} ({col_str}) VALUES ({ph})', v))
 
     async def delete(self, table: str = None, **where):
         if where:
-            conds = [f'"{k}"=?' for k in where]
-            await self._run(lambda: self.adapter.execute(
-                f'DELETE FROM {table} WHERE {" AND ".join(conds)}', list(where.values())))
+            wc = " AND ".join(f'"{k}"=?' for k in where)
+            await self._run(lambda: self.adapter.execute(f'DELETE FROM {table} WHERE {wc}', list(where.values())))
         else:
             await self._run(lambda: self.adapter.execute(f'DELETE FROM {table}'))
 
     async def all(self, table: str = None, **where) -> list[dict]:
         return await self.get(table=table, **where) if where else await self.get(table=table)
 
-    def _encode(self, table: str, col: str, val):
-        dims = {d["name"]: d for d in self._schema.cube(table)["dimensions"]}
-        # JSON 列在 Cube 格式中 type=string 但字段名含 metadata/data/params
-        if col in ("data", "metadata", "params") and not isinstance(val, str):
+    # ── internal ──
+
+    def _encode(self, col: str, val):
+        if col in _JSON_COLS and not isinstance(val, str):
             return json.dumps(val, ensure_ascii=False) if val else None
         return val
 
-    def _decode_json(self, table: str, row: dict):
-        for col in ("data", "metadata", "params"):
+    def _decode_json(self, row: dict):
+        for col in _JSON_COLS:
             if col in row and isinstance(row[col], str):
                 try: row[col] = json.loads(row[col])
                 except: pass
@@ -785,7 +643,7 @@ mode = "live"  # live | backtest
 ### 4.1 ComputeIndicators Command
 
 - [ ] 新增 `ComputeIndicators` command
-- [ ] 实现：读 SchemaEngine 的 `indicator_definitions` → 生成 SQL → 执行写入 indicators 表
+- [ ] 实现：调用 `protocol.indicators_sql(symbol, interval)` → 执行写入 indicators 表
 - [ ] 窗口函数直接 INSERT SELECT
 - [ ] 多输出函数（MACD/BBands）单独处理
 
@@ -825,10 +683,14 @@ mode = "live"  # live | backtest
 | `timing/dashboard/` | 整个模块删除，Grafana 替代 |
 | `timing/frontend/` | 删除，不再自建前端 |
 | `timing/adapters/sqlite.py` | DuckDBProtocol 替代 |
-| `timing/models/kline.py` 中 DDL 相关 | SchemaEngine 替代 |
+| `timing/models/kline.py` | YAML + Protocol.ddl() 替代 |
 | `timing/models/signal.py` | 纯字段定义，YAML 替代 |
-| `timing/models/checkpoint.py` | YAML 替代 |
-| `timing/models/account.py` | 内联到 Broker/SimExchange |
+| `timing/models/checkpoint.py` | 合入 analysis 表 |
+| `timing/models/retracement.py` | 合入 analysis 表 |
+| `timing/models/touch.py` | 合入 analysis 表 data JSON |
+| `timing/models/account.py` | 内联到 Broker |
+| `timing/models/position.py` | 逻辑归入 Broker |
+| `timing/models/order.py` | 逻辑归入 Broker |
 | `config.toml` 中 DashboardService 配置 | 删除 |
 
 ---
@@ -838,14 +700,12 @@ mode = "live"  # live | backtest
 ```
 timing/
 ├── schema/
-│   ├── registry.yml        ← 唯一事实来源（表+指标+度量）
-│   └── engine.py           ← YAML → SQL 生成器
+│   └── registry.yml        ← 唯一事实来源（表+指标+度量）
 ├── adapters/
-│   └── duckdb.py           ← 统一 DuckDB Protocol
+│   └── duckdb.py           ← Protocol（内置 YAML 解析 + CRUD + indicators_sql）
 ├── models/
-│   ├── position.py         ← 只有 apply_fill() 业务逻辑
-│   ├── order.py            ← 只有 mark_filled() 业务逻辑
-│   └── events.py           ← SignalEmitted / OrderFilled / OrderRejected
+│   ├── events.py           ← SignalEmitted / OrderFilled / OrderRejected (BaseEvent)
+│   └── exchange.py         ← SimExchange (模拟撮合引擎)
 ├── data/
 │   ├── app.py              ← DataEngine (用 DuckDBProtocol)
 │   ├── models.py           ← Commands: IngestKlines, ComputeIndicators, GetKlines, PushBars
@@ -856,8 +716,7 @@ timing/
 ├── strategy/
 │   └── app.py              ← FibStrategy (用 DuckDBProtocol)
 ├── execution/
-│   ├── broker.py           ← Broker (用 DuckDBProtocol)
-│   └── adapters/sim.py     ← SimExchange
+│   └── broker.py           ← Broker (用 DuckDBProtocol, 含 _apply_fill/_mark_filled)
 ├── engine/
 │   ├── app.py              ← TimingApp / BacktestApp
 │   └── command.py          ← RunBacktest
@@ -878,22 +737,20 @@ timing/
 | # | 任务 | 耗时 |
 |---|------|------|
 | 1 | 创建 `schema/registry.yml` | 20 min |
-| 2 | 创建 `schema/engine.py` (DDL/INSERT/指标 SQL 生成) | 40 min |
-| 3 | 创建 `adapters/duckdb.py` (统一 Protocol) | 30 min |
-| 4 | 改造 `DataEngine` — 用 DuckDBProtocol + SchemaEngine | 30 min |
-| 5 | 改造 `AnalysisEngine` — 去掉 SQLite，用共享 DuckDBProtocol | 20 min |
-| 6 | 改造 `FibStrategy` — 同上 | 10 min |
-| 7 | 改造 `Broker` — 同上 | 15 min |
-| 8 | 精简 `models/` — 删除纯数据定义，保留业务逻辑 | 20 min |
-| 9 | 删除 `dashboard/`, `frontend/`, `adapters/sqlite.py` | 5 min |
-| 10 | 实现 ComputeIndicators (talib 预计算) | 30 min |
-| 11 | 改造 RunBacktest — 加 run_id + 结果写入 | 20 min |
-| 12 | 修改 batch_ingest_and_compute.py | 10 min |
-| 13 | Grafana 部署 + provisioning | 30 min |
-| 14 | Grafana Dashboard JSON | 45 min |
-| 15 | 端到端验证 | 30 min |
+| 2 | 创建 `adapters/duckdb.py` (Protocol 内置 YAML 解析 + CRUD) | 50 min |
+| 3 | 改造 `DataEngine` — 用共享 DuckDBProtocol | 30 min |
+| 4 | 改造 `AnalysisEngine` — 去掉 SQLite，用共享 DuckDBProtocol | 20 min |
+| 5 | 改造 `FibStrategy` — 同上 | 10 min |
+| 6 | 改造 `Broker` — 同上 + 内联 Position/Order 逻辑 | 20 min |
+| 7 | 删除 `models/` 数据类 + `dashboard/` + `frontend/` + `adapters/sqlite.py` | 10 min |
+| 8 | 实现 ComputeIndicators (talib 预计算) | 30 min |
+| 9 | 改造 RunBacktest — 加 run_id + 结果写入 | 20 min |
+| 10 | 修改 batch_ingest_and_compute.py | 10 min |
+| 11 | Grafana 部署 + provisioning | 30 min |
+| 12 | Grafana Dashboard JSON | 45 min |
+| 13 | 端到端验证 | 30 min |
 
-**总耗时约 6 小时**
+**总耗时约 5 小时**
 
 ---
 

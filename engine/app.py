@@ -4,7 +4,7 @@ from mode.utils.imports import smart_import
 from bollydog.models.service import AppService
 from bollydog.globals import hub
 from bollydog.service.exchange import _make_callback
-from timing.analysis.app import AnalysisEngine, DATA_ROOT
+from timing.analysis.app import AnalysisEngine
 
 log = logging.getLogger(__name__)
 
@@ -17,7 +17,11 @@ class TimingApp(AppService):
 
 
 class BacktestApp(AppService):
-    """回测入口 — 读 backtest.toml 动态创建分析实例 + 注册 subscriber。"""
+    """回测入口 — 读 backtest.toml 动态创建分析实例 + 注册 subscriber。
+
+    每个 service 实例绑定独立的 (symbol, interval, warmup_bars, config)。
+    RunBacktest 遍历所有实例按各自参数跑。
+    """
     domain = "backtest"
     alias = "BacktestApp"
     commands = ["timing.engine.command", "timing.engine.batch"]
@@ -34,18 +38,22 @@ class BacktestApp(AppService):
             log.warning(f'[回测] 配置文件 {self._bt_config_path} 不存在，跳过动态创建')
             return []
         self._bt_params = bt_conf
-
         deps = []
         for i, svc_conf in enumerate(bt_conf.get("services", [])):
             base_cls = smart_import(svc_conf["module"])
             alias = f'{base_cls.alias}_{i}'
             svc_cls = type(alias, (base_cls,), {'alias': alias})
-            svc = svc_cls(cache_path=svc_conf.get("cache_path", f'{DATA_ROOT}/{alias}'))
+            svc = svc_cls()
+            svc._bt_symbol = svc_conf.get("symbol", "")
+            svc._bt_interval = svc_conf.get("interval", "1d")
+            svc._bt_warmup_bars = svc_conf.get("warmup_bars", 200)
             if svc_conf.get("config"):
-                if isinstance(svc.config, dict): svc.config.update(svc_conf["config"])
-                else: svc.config = svc_conf["config"]
+                if isinstance(svc.config, dict):
+                    svc.config.update(svc_conf["config"])
+                else:
+                    svc.config = svc_conf["config"]
             deps.append(svc)
-            log.info(f'[回测] 创建分析实例 {alias}')
+            log.info(f'[回测] 创建分析实例 {alias} → {svc._bt_symbol}/{svc._bt_interval}')
         return deps
 
     async def on_started(self):

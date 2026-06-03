@@ -6,7 +6,11 @@
 #   导入数据：python main.py execute ImportKlines --config config.toml --path warehouse/ods/159363.OF.parquet --symbol 159363.OF --interval 1d
 #
 # 数据根目录由 TIMING_DATA_ROOT 环境变量控制（默认 warehouse/timing）
-# 各模块在 on_start 中自建 protocol 链，无需在此声明 protocol 段
+# run_id 由 TIMING_RUN_ID 环境变量控制（默认 live_default）
+
+[run]
+active_run_id = "live_default"
+mode = "live"
 
 # ── HTTP 入口 ──
 ["bollydog.entrypoint.http.app.HttpService"]
@@ -18,9 +22,6 @@ depends = ["data.DataEngine", "analysis.RetracementService", "strategy.FibStrate
 # ── 回测入口 ──
 ["timing.engine.app.BacktestApp"]
 depends = ["data.DataEngine", "strategy.FibStrategy", "execution.Broker"]
-
-# ── 后管服务 ──
-["timing.dashboard.app.DashboardService"]
 
 # ── 数据层 ──
 ["timing.data.app.DataEngine"]

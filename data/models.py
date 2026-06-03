@@ -1,4 +1,4 @@
-"""DataEngine Command 定义 — PushBars / GetKlines / ImportKlines。"""
+"""DataEngine Command 定义 — PushBars / GetKlines / ImportKlines / ComputeIndicators。"""
 import logging
 from typing import Any, ClassVar, List
 from pydantic import Field
@@ -50,6 +50,21 @@ class ImportKlines(BaseCommand):
         return {"symbol": self.symbol, "interval": self.interval, "count": len(klines)}
 
 
+class ComputeIndicators(BaseCommand):
+    destination: ClassVar[str] = "data.DataEngine.ComputeIndicators"
+    symbol: str = ""
+    interval: str = ""
+
+    async def __call__(self, *args, **kwargs) -> Any:
+        sql = app.db.indicators_sql(self.symbol, self.interval)
+        app.db.adapter.execute(sql)
+        count = app.db.adapter.execute(
+            f'SELECT COUNT(*) FROM indicators WHERE symbol=? AND "interval"=?',
+            [self.symbol, self.interval]).fetchone()[0]
+        log.info(f'[数据] 指标计算完成 {self.symbol}/{self.interval} → {count}行')
+        return {"symbol": self.symbol, "interval": self.interval, "count": count}
+
+
 class GetKlinesAPI(BaseCommand):
     destination: ClassVar[str] = "data.DataEngine.GetKlinesAPI"
     symbol: str = ""
@@ -59,14 +74,13 @@ class GetKlinesAPI(BaseCommand):
     limit: int = 5000
 
     async def __call__(self, *args, **kwargs) -> Any:
-        rows = app.get_klines(self.symbol, self.interval, self.start_ts, self.end_ts, limit=self.limit)
-        return rows
+        return app.get_klines(self.symbol, self.interval, self.start_ts, self.end_ts, limit=self.limit)
 
 
 class ListSymbols(BaseCommand):
     destination: ClassVar[str] = "data.DataEngine.ListSymbols"
 
     async def __call__(self, *args, **kwargs) -> Any:
-        sql = "SELECT symbol, interval, COUNT(*) as count, MIN(ts) as first_ts, MAX(ts) as last_ts FROM klines GROUP BY symbol, interval"
-        result = app._conn.execute(sql).fetchall()
+        sql = "SELECT symbol, \"interval\", COUNT(*) as count, MIN(ts) as first_ts, MAX(ts) as last_ts FROM klines GROUP BY symbol, \"interval\""
+        result = app.db.adapter.execute(sql).fetchall()
         return [{"symbol": r[0], "interval": r[1], "count": r[2], "first_ts": r[3], "last_ts": r[4]} for r in result]

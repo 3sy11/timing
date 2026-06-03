@@ -1,3 +1,1 @@
-from .sqlite import TableSchema, StructuredSQLiteProtocol
-
-__all__ = ["TableSchema", "StructuredSQLiteProtocol"]
+from timing.adapters.duckdb import TimingDuckDBProtocol

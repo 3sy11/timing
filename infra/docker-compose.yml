@@ -1,0 +1,12 @@
+services:
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=timing
+      - GF_INSTALL_PLUGINS=frser-sqlite-datasource,marcusolsson-json-datasource
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ../../warehouse/timing:/data/timing:ro
+    restart: unless-stopped

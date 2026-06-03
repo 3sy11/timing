@@ -1,18 +1,24 @@
-# 回测配置 — BacktestApp.on_init_dependencies 读取此文件
-warmup_bars = 200
-symbol = "159363.OF"
-interval = "1d"
+# 回测配置
+# run_id 可选，不填则自动生成 bt_<hex6>
+run_id = ""
+
+# 每个 service 独立配置 symbol / interval / warmup_bars / config
+# RunBacktest 会遍历所有 service，按各自参数独立跑
 
 [[services]]
 module = "timing.analysis.algo.retracement.service.RetracementService"
-cache_path = "cache/backtest/retracement_0"
+symbol = "159363.OF"
+interval = "1d"
+warmup_bars = 200
 [services.config]
 touch_tolerance = 0.3
 min_leg_span_pct = 0.05
 
 [[services]]
 module = "timing.analysis.algo.retracement.service.RetracementService"
-cache_path = "cache/backtest/retracement_1"
+symbol = "510300.OF"
+interval = "1d"
+warmup_bars = 200
 [services.config]
 touch_tolerance = 0.5
 min_leg_span_pct = 0.03
