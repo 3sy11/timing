@@ -55,9 +55,9 @@ class FibStrategy(AppService):
     async def _record_decision(self, symbol: str, ts: int, direction: str, strength: float, price: float, action: str, reason: str):
         if not self.db:
             return
-        await self.db.append("decisions", {"run_id": self.run_id, "symbol": symbol, "ts": ts,
-                                           "direction": direction, "strength": strength,
-                                           "price": price, "action": action, "reason": reason})
+        await self.db.put("decisions", {"run_id": self.run_id, "symbol": symbol, "ts": ts,
+                                        "direction": direction, "strength": strength,
+                                        "price": price, "action": action, "reason": reason})
 
     async def on_stop(self):
         await super().on_stop()

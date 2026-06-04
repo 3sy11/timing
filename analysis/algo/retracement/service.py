@@ -113,7 +113,7 @@ class RetracementService(AnalysisEngine):
         if broken:
             broken_idx = {b["group_idx"] for b in broken}
             cache["groups"] = [g for i, g in enumerate(groups) if i not in broken_idx]
-            klines = await hub.execute(GetKlines(symbol=symbol, interval=interval))
+            klines = getattr(self, '_bt_klines', None) or await hub.execute(GetKlines(symbol=symbol, interval=interval))
             if klines:
                 new_result = compute_retracement(klines, cfg)
                 await self.db.put("analysis", {"run_id": self.run_id, "symbol": symbol, "interval": interval,

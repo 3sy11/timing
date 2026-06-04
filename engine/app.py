@@ -1,10 +1,7 @@
 """TimingApp / BacktestApp — 生产/回测两个入口。"""
-import tomllib, logging
-from mode.utils.imports import smart_import
+import os, logging
 from bollydog.models.service import AppService
 from bollydog.globals import hub
-from bollydog.service.exchange import _make_callback
-from timing.analysis.app import AnalysisEngine
 
 log = logging.getLogger(__name__)
 
@@ -17,54 +14,55 @@ class TimingApp(AppService):
 
 
 class BacktestApp(AppService):
-    """回测入口 — 读 backtest.toml 动态创建分析实例 + 注册 subscriber。
+    """回测入口 — 提供 RunBacktest / MergeBacktest 命令。
 
-    每个 service 实例绑定独立的 (symbol, interval, warmup_bars, config)。
-    RunBacktest 遍历所有实例按各自参数跑。
+    RunBacktest: 读指定 backtest toml → 串行执行 → 写临时文件
+    MergeBacktest: 合并所有临时文件到主库
+
+    多进程并行：开多个终端 execute 不同 toml 即可。
     """
     domain = "backtest"
     alias = "BacktestApp"
-    commands = ["timing.engine.command", "timing.engine.batch"]
+    commands = ["timing.engine.command"]
 
-    def __init__(self, backtest_config="backtest.toml", **kwargs):
+    def __init__(self, backtest_config="backtest.toml", ods_dir="warehouse/ods", **kwargs):
         self._bt_config_path = backtest_config
+        self._ods_dir = ods_dir
         super().__init__(**kwargs)
 
     def on_init_dependencies(self):
-        try:
-            with open(self._bt_config_path, 'rb') as f:
-                bt_conf = tomllib.load(f)
-        except FileNotFoundError:
-            log.warning(f'[回测] 配置文件 {self._bt_config_path} 不存在，跳过动态创建')
-            return []
-        self._bt_params = bt_conf
-        deps = []
-        for i, svc_conf in enumerate(bt_conf.get("services", [])):
-            base_cls = smart_import(svc_conf["module"])
-            alias = f'{base_cls.alias}_{i}'
-            svc_cls = type(alias, (base_cls,), {'alias': alias})
-            svc = svc_cls()
-            svc._bt_symbol = svc_conf.get("symbol", "")
-            svc._bt_interval = svc_conf.get("interval", "1d")
-            svc._bt_warmup_bars = svc_conf.get("warmup_bars", 200)
-            if svc_conf.get("config"):
-                if isinstance(svc.config, dict):
-                    svc.config.update(svc_conf["config"])
-                else:
-                    svc.config = svc_conf["config"]
-            deps.append(svc)
-            log.info(f'[回测] 创建分析实例 {alias} → {svc._bt_symbol}/{svc._bt_interval}')
-        return deps
+        return []
 
     async def on_started(self):
-        registered = 0
-        for svc in AnalysisEngine._services.values():
-            for topic, methods in type(svc).subscriber.items():
-                methods = [methods] if isinstance(methods, str) else methods
-                for method_name in methods:
-                    bound = getattr(svc, method_name)
-                    cmd_cls = _make_callback(svc, method_name, bound)
-                    hub.exchange.subscribe(topic, cmd_cls)
-                    registered += 1
-        log.info(f'[回测] 注册了 {registered} 个事件处理器，覆盖 {len(AnalysisEngine._services)} 个分析服务')
+        await self._ensure_data()
         await super().on_started()
+
+    async def _ensure_data(self):
+        """检查主库品种数据，缺失则自动导入。无 DataEngine 或锁冲突则跳过。"""
+        from bollydog.models.service import BaseService
+        if "data.DataEngine.ImportKlines" not in BaseService.registry:
+            log.info('[回测] 无 DataEngine，跳过数据导入（RunBacktest 从 parquet 直读）'); return
+        from timing.adapters.duckdb import TimingDuckDBProtocol
+        from timing.data.models import ImportKlines
+        db = TimingDuckDBProtocol.shared()
+        try:
+            if not db.adapter:
+                await db.on_start()
+        except Exception as e:
+            log.info(f'[回测] 跳过数据导入（主库锁: {e}），回测从 parquet 直读'); return
+
+        if not os.path.isdir(self._ods_dir):
+            return
+        parquets = [f for f in os.listdir(self._ods_dir) if f.endswith(".parquet")]
+        for fname in sorted(parquets):
+            sym = fname.replace(".parquet", "")
+            try:
+                cnt = db.adapter.execute(
+                    'SELECT COUNT(*) FROM klines WHERE symbol=? AND "interval"=?', [sym, "1d"]).fetchone()[0]
+                if cnt > 0:
+                    continue
+            except Exception:
+                continue
+            path = os.path.join(self._ods_dir, fname)
+            log.info(f'[回测] 自动导入 {sym}/1d ← {path}')
+            await hub.execute(ImportKlines(path=path, symbol=sym, interval="1d"))

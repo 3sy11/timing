@@ -73,13 +73,16 @@ class TimingDuckDBProtocol(BaseDuckDBProtocol):
         os.makedirs(os.path.dirname(self.url) or ".", exist_ok=True)
         await super().on_start()
         try:
-            self.adapter.execute("INSTALL talib FROM community")
             self.adapter.execute("LOAD talib")
-        except Exception as e:
-            log.warning(f'[TimingDuckDB] talib 加载失败(非必要): {e}')
+        except Exception:
+            pass
         for t in self.tables():
             self.adapter.execute(self.ddl(t))
         log.info(f'[TimingDuckDB] ready: {self.url}, tables={self.tables()}')
+
+    async def _run(self, fn, *args, **kwargs):
+        """DuckDB 内嵌引擎直接同步执行，避免线程并发导致 'No open result set'。"""
+        return fn(*args, **kwargs)
 
     # ── CRUD ──
 
