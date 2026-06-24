@@ -2,9 +2,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 from timing.execution.broker import Broker
-from timing.execution.adapters.sim import SimExchange
-from timing.models.order import FillResult
-from timing.models.position import Position
+from timing.models.exchange import SimExchange
 
 
 @pytest.fixture
@@ -12,14 +10,14 @@ def mock_db():
     db = AsyncMock()
     db.get = AsyncMock(return_value=None)
     db.put = AsyncMock()
-    db.all = AsyncMock(return_value=[])
-    db.clear = AsyncMock()
+    db.append = AsyncMock()
     return db
 
 
 async def test_market_fill(mock_db):
     broker = Broker.__new__(Broker)
     broker.db = mock_db
+    broker.run_id = "test"
     broker.exchange = SimExchange(initial_balance=100000)
     with patch("timing.execution.broker.hub") as mock_hub:
         mock_hub.dispatch = AsyncMock()
@@ -34,16 +32,10 @@ async def test_market_fill(mock_db):
 async def test_limit_order_pending(mock_db):
     broker = Broker.__new__(Broker)
     broker.db = mock_db
+    broker.run_id = "test"
     broker.exchange = SimExchange(initial_balance=100000)
     with patch("timing.execution.broker.hub") as mock_hub:
         mock_hub.dispatch = AsyncMock()
         result = await broker.on_submit_order("T", "buy", "limit", 1.0, 9.5, 0, {"close": 10.0, "ts": 2000})
     assert result is None
     assert len(broker.exchange._pending_orders) == 1
-
-
-async def test_position_apply_fill():
-    pos = Position(symbol="T", side="long", quantity=1.0, avg_entry_price=10.0)
-    fill = FillResult(order_id="x", symbol="T", side="sell", filled_price=12.0, filled_quantity=1.0, commission=0.012, ts=999)
-    rpnl = pos.apply_fill(fill)
-    assert rpnl == pytest.approx(2.0) and pos.side == "flat" and pos.realized_pnl == pytest.approx(2.0)

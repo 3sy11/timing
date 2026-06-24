@@ -1,53 +1,46 @@
-"""Layer 4: E2E 测试 — 通过 run_hub 完整执行。
-
-Hub.__aexit__ 在 mode.Service 中可能挂起（Queue consumer），
-使用 asyncio.wait_for 确保测试不卡死。
-"""
-import asyncio
-import shutil
+"""Layer 4: RunBacktest E2E — 使用 run_execute 轻量执行。"""
+import os, shutil
 from pathlib import Path
 import pytest
-from bollydog.testing import run_hub
-from bollydog.models.base import BaseService
-from bollydog.models.service import AppService
-from bollydog.globals import _hub_ctx_stack, _protocol_ctx_stack, _message_ctx_stack, _session_ctx_stack, _app_ctx_stack
+from bollydog.testing import run_execute
+from timing.engine.command import RunBacktest, MergeBacktest
+from timing.adapters.duckdb import TimingDuckDBProtocol
 
-CONFIG = str(Path(__file__).resolve().parent.parent / "config.toml")
-PARQUET = str(Path(__file__).resolve().parent.parent / "warehouse" / "ods" / "159363.OF.parquet")
-CACHE_DIR = Path(__file__).resolve().parent.parent / "cache"
+CONFIG_BT = str(Path(__file__).resolve().parent.parent / "config_backtest.toml")
+BACKTEST_TOML = str(Path(__file__).resolve().parent.parent / "backtest.toml")
+TMP_DATA = "/tmp/timing_test_bt"
 
 
 @pytest.fixture(autouse=True)
-def clean_env():
-    if CACHE_DIR.exists(): shutil.rmtree(CACHE_DIR)
+def clean_tmp():
+    if os.path.exists(TMP_DATA): shutil.rmtree(TMP_DATA)
+    os.makedirs(TMP_DATA, exist_ok=True)
+    os.environ["TIMING_DATA_ROOT"] = TMP_DATA
+    TimingDuckDBProtocol.reset_shared()
     yield
-    if CACHE_DIR.exists(): shutil.rmtree(CACHE_DIR)
-    AppService._apps.clear()
-    BaseService.registry.clear()
-    for stack in (_hub_ctx_stack, _protocol_ctx_stack, _message_ctx_stack, _session_ctx_stack, _app_ctx_stack):
-        while stack.top is not None:
-            stack.pop()
+    TimingDuckDBProtocol.reset_shared()
+    if os.path.exists(TMP_DATA): shutil.rmtree(TMP_DATA)
 
 
-async def test_import_and_backtest():
-    """E2E: ImportKlines → RunBacktest 完整流程。"""
-    from bollydog.service import load_from_config
-    from bollydog.service.app import Hub
-    from timing.data.models import ImportKlines
-    from timing.engine.command import RunBacktest
-
-    load_from_config(CONFIG)
-    hub = AppService._apps['bollydog.Hub']
-    await hub.start()
-
-    result = await hub.execute(ImportKlines(symbol="159363.OF", interval="1d", path=PARQUET))
-    assert result["count"] == 328
-
-    result = await hub.execute(RunBacktest(symbol="159363.OF", interval="1d"))
+async def test_run_backtest_produces_signals():
+    """RunBacktest 读 backtest.toml 配置，串行执行，写临时文件。"""
+    async with run_execute(CONFIG_BT) as executor:
+        msg = RunBacktest(backtest_config=BACKTEST_TOML, run_id="test_e2e")
+        result = await executor.execute(msg)
     assert result is not None
-    assert result["klines_total"] == 328 and result["errors"] == 0
-    assert len(result["decisions"]) > 0
-    assert len(result["fills"]) > 0
-    assert result["account"]["total"] != result["account"]["initial_balance"]
+    assert result["run_id"] == "test_e2e"
+    assert result["signals_count"] > 0
+    assert os.path.exists(result["tmp_path"])
 
-    # 不调用 hub.stop()，让 clean_env fixture 清理全局状态
+
+async def test_merge_backtest():
+    """先执行 RunBacktest，再执行 MergeBacktest 合并到主库。"""
+    async with run_execute(CONFIG_BT) as executor:
+        msg = RunBacktest(backtest_config=BACKTEST_TOML, run_id="merge_test")
+        bt_result = await executor.execute(msg)
+
+    TimingDuckDBProtocol.reset_shared()
+    async with run_execute(CONFIG_BT) as executor:
+        merge_result = await executor.execute(MergeBacktest())
+    assert merge_result["files"] == 1
+    assert merge_result["merged"] > 0

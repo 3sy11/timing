@@ -1,7 +1,7 @@
 """TimingApp / BacktestApp — 生产/回测两个入口。"""
 import os, logging
 from bollydog.models.service import AppService
-from bollydog.globals import hub
+from bollydog.globals import hub, registry, services
 
 log = logging.getLogger(__name__)
 
@@ -30,39 +30,29 @@ class BacktestApp(AppService):
         self._ods_dir = ods_dir
         super().__init__(**kwargs)
 
-    def on_init_dependencies(self):
-        return []
-
     async def on_started(self):
         await self._ensure_data()
         await super().on_started()
 
     async def _ensure_data(self):
         """检查主库品种数据，缺失则自动导入。无 DataEngine 或锁冲突则跳过。"""
-        from bollydog.models.service import BaseService
-        if "data.DataEngine.ImportKlines" not in BaseService.registry:
+        if "data.DataEngine" not in services:
             log.info('[回测] 无 DataEngine，跳过数据导入（RunBacktest 从 parquet 直读）'); return
         from timing.adapters.duckdb import TimingDuckDBProtocol
         from timing.data.models import ImportKlines
         db = TimingDuckDBProtocol.shared()
         try:
-            if not db.adapter:
-                await db.on_start()
+            if not db.adapter: await db.on_start()
         except Exception as e:
             log.info(f'[回测] 跳过数据导入（主库锁: {e}），回测从 parquet 直读'); return
-
-        if not os.path.isdir(self._ods_dir):
-            return
+        if not os.path.isdir(self._ods_dir): return
         parquets = [f for f in os.listdir(self._ods_dir) if f.endswith(".parquet")]
         for fname in sorted(parquets):
             sym = fname.replace(".parquet", "")
             try:
-                cnt = db.adapter.execute(
-                    'SELECT COUNT(*) FROM klines WHERE symbol=? AND "interval"=?', [sym, "1d"]).fetchone()[0]
-                if cnt > 0:
-                    continue
-            except Exception:
-                continue
+                cnt = db.adapter.execute('SELECT COUNT(*) FROM klines WHERE symbol=? AND "interval"=?', [sym, "1d"]).fetchone()[0]
+                if cnt > 0: continue
+            except Exception: continue
             path = os.path.join(self._ods_dir, fname)
             log.info(f'[回测] 自动导入 {sym}/1d ← {path}')
             await hub.execute(ImportKlines(path=path, symbol=sym, interval="1d"))

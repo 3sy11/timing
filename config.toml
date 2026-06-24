@@ -1,19 +1,15 @@
 # timing 主配置文件
 #
 # 启动命令：
-#   生产模式：python main.py service --config config.toml
-#   回测模式：python main.py execute RunBacktest --config config.toml --symbol 159363.OF --interval 1d
+#   生产模式：ENTRYPOINT_HTTP_ENABLED=1 python main.py service --config config.toml
+#   回测（单次）：python main.py execute RunBacktest --config config_backtest.toml --backtest_config bt.toml --timeout 7200
+#   回测（自定义run_id）：python main.py execute RunBacktest --config config_backtest.toml --backtest_config bt.toml --run_id exp_01 --timeout 7200
+#   合并回测结果：python main.py execute MergeBacktest --config config_backtest.toml
 #   导入数据：python main.py execute ImportKlines --config config.toml --path warehouse/ods/159363.OF.parquet --symbol 159363.OF --interval 1d
 #
+# HTTP 入口通过环境变量 ENTRYPOINT_HTTP_ENABLED=1 开启（框架 DEFAULT_SERVICES 管理）
 # 数据根目录由 TIMING_DATA_ROOT 环境变量控制（默认 warehouse/timing）
 # run_id 由 TIMING_RUN_ID 环境变量控制（默认 live_default）
-
-[run]
-active_run_id = "live_default"
-mode = "live"
-
-# ── HTTP 入口 ──
-["bollydog.entrypoint.http.app.HttpService"]
 
 # ── 生产入口 ──
 ["timing.engine.app.TimingApp"]
@@ -33,6 +29,7 @@ subscriber = {"data.DataEngine.PushBars" = "on_bar"}
 
 # ── 策略层 ──
 ["timing.strategy.app.FibStrategy"]
+depends = ["execution.Broker"]
 subscriber = {"analysis.AnalysisEngine.SignalEmitted" = "on_signal"}
 
 # ── 执行层 ──

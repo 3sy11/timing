@@ -1,0 +1,12 @@
+# 回测专用配置 — 无 HTTP，无 DataEngine，适合多进程并行
+#
+# RunBacktest 直接从 parquet 读 K 线（无主库依赖，进程完全独立）
+# 每个进程独立写临时文件，最后通过 MergeBacktest 合并到主库
+#
+# 用法（多进程并行）：
+#   终端1: python main.py execute RunBacktest --config config_backtest.toml --backtest_config bt_a.toml --run_id exp_a --timeout 7200
+#   终端2: python main.py execute RunBacktest --config config_backtest.toml --backtest_config bt_b.toml --run_id exp_b --timeout 7200
+#   合并:   python main.py execute MergeBacktest --config config_backtest.toml
+
+# ── 回测入口 ──
+["timing.engine.app.BacktestApp"]

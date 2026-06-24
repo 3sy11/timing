@@ -1,9 +1,26 @@
-# 回测配置
-# run_id 可选，不填则自动生成 bt_<hex6>
-run_id = ""
+# 回测配置示例 — 通过 execute 提交
+# 用法: python main.py execute RunBacktest --config config.toml --backtest_config backtest.toml
+# run_id 不填则自动生成
+# run_id = "my_experiment_01"
 
-# 每个 service 独立配置 symbol / interval / warmup_bars / config
-# RunBacktest 会遍历所有 service，按各自参数独立跑
+# ═══ 159363.OF ═══
+[[services]]
+module = "timing.analysis.algo.retracement.service.RetracementService"
+symbol = "159363.OF"
+interval = "1d"
+warmup_bars = 80
+[services.config]
+touch_tolerance = 0.2
+min_leg_span_pct = 0.03
+
+[[services]]
+module = "timing.analysis.algo.retracement.service.RetracementService"
+symbol = "159363.OF"
+interval = "1d"
+warmup_bars = 120
+[services.config]
+touch_tolerance = 0.35
+min_leg_span_pct = 0.05
 
 [[services]]
 module = "timing.analysis.algo.retracement.service.RetracementService"
@@ -11,15 +28,5 @@ symbol = "159363.OF"
 interval = "1d"
 warmup_bars = 200
 [services.config]
-touch_tolerance = 0.3
-min_leg_span_pct = 0.05
-
-[[services]]
-module = "timing.analysis.algo.retracement.service.RetracementService"
-symbol = "510300.OF"
-interval = "1d"
-warmup_bars = 200
-[services.config]
 touch_tolerance = 0.5
-min_leg_span_pct = 0.03
-skip_recent = 5
+min_leg_span_pct = 0.08

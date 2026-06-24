@@ -86,6 +86,7 @@ class RunBacktest(BaseCommand):
                                [run_id, int(time.time()), "completed", "backtest", symbols_desc,
                                 f'{{"services": {len(svcs)}, "total_signals": {total_signals}}}'])
 
+        tmp_db.adapter.close()
         log.info(f'[回测] 全部完成 run_id={run_id} 信号={total_signals} 文件={tmp_path}')
         return {"run_id": run_id, "services": len(svcs), "symbols": symbols_desc,
                 "signals_count": total_signals, "tmp_path": tmp_path}

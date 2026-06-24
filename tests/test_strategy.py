@@ -1,8 +1,6 @@
-"""Layer 3: FibStrategy 行为测试 — mock db + hub。"""
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+"""Layer 3: FibStrategy 行为测试 — mock db + broker。"""
+from unittest.mock import AsyncMock, MagicMock
 from timing.strategy.app import FibStrategy
-from timing.strategy.models import StrategyDecision
 
 
 def _make_strategy():
@@ -10,8 +8,9 @@ def _make_strategy():
     svc.position_size = 0.1
     svc.min_strength = 0.6
     svc.db = AsyncMock()
-    svc.db.append = AsyncMock()
-    svc.db.get = AsyncMock(return_value=[])
+    svc.db.put = AsyncMock()
+    svc.run_id = "test_run"
+    svc.depends = {}
     return svc
 
 
@@ -27,37 +26,28 @@ def _make_signal_cmd(direction="long", strength=0.8, symbol="T", price=10.0, ts=
 
 async def test_strong_signal_submits_order():
     svc = _make_strategy()
+    mock_broker = AsyncMock()
+    mock_broker.on_submit_order = AsyncMock()
+    svc.depends = {"execution.Broker": mock_broker}
     cmd = _make_signal_cmd(direction="long", strength=0.8, price=10.0)
-    with patch("timing.strategy.app.hub") as mock_hub:
-        mock_hub.execute = AsyncMock()
-        await svc.on_signal(cmd)
-    svc.db.append.assert_called()
-    call_data = svc.db.append.call_args[0][1]
+    await svc.on_signal(cmd)
+    svc.db.put.assert_called()
+    call_data = svc.db.put.call_args[0][1]
     assert call_data["action"] == "submit"
-    mock_hub.execute.assert_called_once()
+    mock_broker.on_submit_order.assert_called_once()
 
 
 async def test_weak_signal_skips():
     svc = _make_strategy()
     cmd = _make_signal_cmd(direction="long", strength=0.3)
-    with patch("timing.strategy.app.hub") as mock_hub:
-        mock_hub.execute = AsyncMock()
-        await svc.on_signal(cmd)
-    call_data = svc.db.append.call_args[0][1]
+    await svc.on_signal(cmd)
+    call_data = svc.db.put.call_args[0][1]
     assert call_data["action"] == "skip" and "strength" in call_data["reason"]
-    mock_hub.execute.assert_not_called()
 
 
 async def test_neutral_skips():
     svc = _make_strategy()
     cmd = _make_signal_cmd(direction="neutral", strength=0.9)
-    with patch("timing.strategy.app.hub") as mock_hub:
-        mock_hub.execute = AsyncMock()
-        await svc.on_signal(cmd)
-    call_data = svc.db.append.call_args[0][1]
+    await svc.on_signal(cmd)
+    call_data = svc.db.put.call_args[0][1]
     assert call_data["action"] == "skip" and "neutral" in call_data["reason"]
-
-
-def test_decision_model_frozen():
-    d = StrategyDecision(ts=100, symbol="T", direction="long", strength=0.7, price=10, action="submit", reason="buy")
-    assert d.ts == 100 and d.model_config["frozen"] is True

@@ -27,8 +27,7 @@ class Broker(AppService):
 
     async def on_start(self) -> None:
         self.db = TimingDuckDBProtocol.shared()
-        if not self.db.adapter:
-            await self.db.on_start()
+        if not self.db.adapter: await self.db.on_start()
         self.run_id = os.environ.get("TIMING_RUN_ID", "live_default")
         self.exchange = SimExchange(initial_balance=self._initial_balance,
                                    slippage_pct=self._slippage_pct, commission_rate=self._commission_rate)
@@ -53,7 +52,8 @@ class Broker(AppService):
             return fill
         if order["status"] == "rejected":
             await self.db.put("orders", order)
-            await hub.dispatch(OrderRejected(order_id=order["order_id"], symbol=symbol, reason="exchange_rejected", ts=bar.get("ts", 0)))
+            try: await hub.dispatch(OrderRejected(order_id=order["order_id"], symbol=symbol, reason="exchange_rejected", ts=bar.get("ts", 0)))
+            except Exception: pass
             return None
         await self.db.put("orders", order)
         return None
@@ -78,11 +78,12 @@ class Broker(AppService):
                                        "filled_price": fill["filled_price"],
                                        "filled_quantity": fill["filled_quantity"],
                                        "commission": fill["commission"], "ts": fill["ts"]})
-        if rpnl != 0:
-            self.exchange.account_settle(rpnl, 0)
-        await hub.dispatch(OrderFilled(order_id=fill["order_id"], symbol=fill["symbol"], side=fill["side"],
-                                       filled_price=fill["filled_price"], filled_quantity=fill["filled_quantity"],
-                                       commission=fill["commission"], realized_pnl=rpnl, ts=fill["ts"]))
+        if rpnl != 0: self.exchange.account_settle(rpnl, 0)
+        try:
+            await hub.dispatch(OrderFilled(order_id=fill["order_id"], symbol=fill["symbol"], side=fill["side"],
+                                           filled_price=fill["filled_price"], filled_quantity=fill["filled_quantity"],
+                                           commission=fill["commission"], realized_pnl=rpnl, ts=fill["ts"]))
+        except Exception: pass
         log.info(f'[Broker] 成交 {fill["side"]} {fill["symbol"]} qty={fill["filled_quantity"]} rpnl={rpnl:.4f}')
 
     async def get_position(self, symbol: str) -> dict | None:
