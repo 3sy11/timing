@@ -19,11 +19,11 @@ class ComputeRetracement(BaseCommand):
         svc = app
         klines = self.klines
         if not klines:
-            from timing.data.models import GetKlines
+            from timing.integration.command import GetKlines
             klines = await hub.execute(GetKlines(symbol=self.symbol, interval=self.interval))
         if not klines:
             log.warning(f'[Retracement] ComputeRetracement: no klines for {self.symbol}/{self.interval}'); return None
-        from .algo import compute_retracement
+        from timing.computation.algo.fib_retracement.algo import compute_fib_retracement as compute_retracement
         from .service import _serialize
         result = compute_retracement(klines, svc.cfg)
         await svc.db.put("retracements", {"symbol": self.symbol, "interval": self.interval, "data": _serialize(result)})

@@ -13,8 +13,8 @@
 import logging
 from typing import Dict, List, Tuple
 import pandas as pd
-from .config import RetracementConfig
-from .models import FibGroup
+from timing.computation.algo.fib_retracement.config import RetracementConfig
+from timing.computation.algo.fib_retracement.models import FibGroup
 
 log = logging.getLogger(__name__)
 
@@ -193,7 +193,7 @@ def check_breakout(close: float, groups: List[FibGroup], tolerance: float = None
 def compute_touch_signals(klines: List[dict], groups: List[FibGroup], cfg: RetracementConfig = None) -> dict:
     """扫描 K 线，对每个触线位做多维信号评分 + 突破检测。"""
     cfg = cfg or _DEFAULT_CFG
-    from .algo import base_df
+    from timing.computation.algo.fib_retracement.algo import base_df
     df = base_df(klines)
     n = len(df)
     if n == 0 or not groups:

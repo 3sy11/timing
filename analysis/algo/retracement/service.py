@@ -19,11 +19,11 @@ from dataclasses import asdict
 import pandas as pd
 from bollydog.globals import hub
 from timing.analysis.app import AnalysisEngine
-from timing.data.models import GetKlines
-from .config import RetracementConfig
+from timing.integration.command import GetKlines
+from timing.computation.algo.fib_retracement.config import RetracementConfig
 from .command import ComputeRetracement  # noqa: F401
-from .models import TrendLeg, FibGroup
-from .algo import compute_retracement
+from timing.computation.algo.fib_retracement.models import TrendLeg, FibGroup
+from timing.computation.algo.fib_retracement.algo import compute_fib_retracement as compute_retracement
 from .touch import compute_consensus_strength, check_breakout
 
 log = logging.getLogger(__name__)

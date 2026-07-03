@@ -1,3 +1,3 @@
 from .service import RetracementService
-from .config import RetracementConfig
-from .models import TrendLeg, FibGroup
+from timing.computation.algo.fib_retracement.config import RetracementConfig  # noqa: re-export
+from timing.computation.algo.fib_retracement.models import TrendLeg, FibGroup  # noqa: re-export

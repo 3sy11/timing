@@ -1,5 +1,7 @@
-"""duckdb .df() 读 parquet/csv → pandas 按 OHLCV.meta 规整 → list[dict]。
-读文件 Command 在 timing.data.models.ImportKlines，此处仅纯函数 read_file。"""
+"""读取外部数据文件（parquet/csv）→ 标准化 OHLCV list[dict]。
+
+支持 OHLCV.meta 列名映射，支持目录/单文件两种输入。
+"""
 import csv, logging, os
 from typing import Dict, List
 import duckdb
@@ -45,7 +47,6 @@ def _apply_meta(df: pd.DataFrame, meta: Dict[str, str]) -> pd.DataFrame:
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """无 meta：要求存在 ts/open/high/low/close（列名大小写不敏感）。"""
     lower = {str(c).strip().lower(): c for c in df.columns}
     need = ("ts", "open", "high", "low", "close")
     miss = [x for x in need if x not in lower]
@@ -56,17 +57,15 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_file(path: str) -> List[dict]:
-    """duckdb 读文件 → pandas 按元信息处理 → list[dict]（字典列表）。"""
+    """duckdb 读文件 → 标准化 OHLCV → list[dict]。"""
     data_dir, glob, reader = _resolve_source(path)
     meta = _read_meta(data_dir)
     sql = f"SELECT * FROM {reader}('{glob}')"
     with duckdb.connect() as conn:
         df = conn.sql(sql).df()
-    log.info(f"[file] read {glob} rows={len(df)} meta={bool(meta)}")
-    if meta:
-        df = _apply_meta(df, meta)
-    else:
-        df = _normalize_columns(df)
+    log.info(f"[integration] read {glob} rows={len(df)} meta={bool(meta)}")
+    if meta: df = _apply_meta(df, meta)
+    else: df = _normalize_columns(df)
     df["ts"] = _ts_to_ms(df["ts"])
     for c in ("open", "high", "low", "close"):
         df[c] = pd.to_numeric(df[c].astype(str).str.replace(",", "", regex=False), errors="coerce").astype("float64")
