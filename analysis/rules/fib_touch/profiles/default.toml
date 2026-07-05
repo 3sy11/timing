@@ -1,0 +1,7 @@
+# fib_touch 默认 profile — 触线检测参数
+touch_tolerance = 0.5
+cooldown_bars = 5
+scan_bars = 0
+strong_threshold = 5.0
+medium_threshold = 3.5
+weak_threshold = 2.0

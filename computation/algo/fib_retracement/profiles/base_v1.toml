@@ -1,0 +1,10 @@
+# base_v1 — 基础参数组（保守配置）
+# 用法：python main.py execute Compute --algo fib_retracement --compute_id base_v1 --symbol 159363.OF --interval 1d
+
+pivot_windows = [[5, 5], [8, 8]]
+zigzag_thresholds = [0.05, 0.10]
+regression_windows = [50, 100]
+recent_bars = 90
+skip_recent = 10
+min_leg_span_pct = 0.03
+top_n = 6

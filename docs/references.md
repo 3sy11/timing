@@ -215,3 +215,109 @@ Dashboard 中所有 panel 用 `WHERE run_id = '$run_id'`，
 当前 timing 项目建议：**先把 runs 表的 metrics/params 做丰富**，
 等实验量上来后再考虑引入 MLflow 服务器。核心设计（run_id 统一）
 已经和 MLflow 思路对齐，迁移成本很低。
+
+---
+
+## 七、计算模块实验管理方案对比（2026-07）
+
+> 计算模块（Computation）需要在每个 `compute_id` 目录中记录实验变量，
+> 以便追溯参数、对比不同配置的计算结果。以下是调研的方案对比。
+
+### 7.1 候选方案
+
+| 方案 | 代表工具 | 核心模式 | 适合规模 |
+|------|---------|---------|---------|
+| **A. JSON manifest in directory** | Hydra outputs/、expbox artifacts/ | 每次实验在产出目录写入 config snapshot | 小/中 |
+| **B. SQLite/DuckDB tracking** | Beacon、自建 runs 表 | 统一追踪表记录 params + metrics | 中 |
+| **C. Git-anchored snapshot** | DVC params.yaml、expbox | Git commit 绑定 + 参数文件追踪 | 中/大 |
+| **D. Tracking Server** | MLflow、W&B | 独立服务存储、UI 对比、API 查询 | 大 |
+| **E. Hydra-style compose** | Hydra、hydra-zen、Beacon | 声明式 config 组合 + 自动输出目录 | 中/大 |
+
+### 7.2 方案详细分析
+
+#### A. JSON Manifest in Directory（选定）
+
+**代表**：Hydra 的 `outputs/{date}/{time}/.hydra/config.yaml`、expbox 的 `results/{exp_id}/artifacts/config.yaml`
+
+```
+computation/fib_retracement/base_v1/
+├── manifest.json          # 完整参数 + 元数据
+├── step1_pivots_*.parquet
+└── result_*.parquet
+```
+
+- 优点：零依赖、自包含、可 `jq`/`diff` 查看、DuckDB `read_json` 批量查询
+- 缺点：无 UI、需手动编排写入逻辑
+- 适合：当前阶段（实验量 < 100，单人开发）
+
+#### B. SQLite/DuckDB Tracking
+
+**代表**：Beacon 的内置 SQLite tracking、timing 现有 `runs` 表
+
+```python
+# Beacon 风格
+tracker.log_run(config=cfg, metrics=result, tags=["fib", "v1"])
+```
+
+- 优点：统一查询、可 JOIN 对比、Grafana 可视化
+- 缺点：与文件系统分离（需两处看）、需维护 schema
+- 适合：中期（实验量 100+，需要快速筛选最优参数）
+
+#### C. Git-Anchored Snapshot
+
+**代表**：expbox 的 git commit hash 记录、DVC `params.yaml` 追踪
+
+```json
+{"git_commit": "abc1234", "git_branch": "feat/fib-v2", "dirty": false}
+```
+
+- 优点：完整代码溯源（参数 + 代码版本绑定）
+- 缺点：要求干净 commit、频繁实验时 git 历史膨胀
+- 适合：需要精确复现的正式实验
+
+#### D. Tracking Server（MLflow/W&B）
+
+- 优点：UI 对比、团队共享、自动图表、Bayesian sweep
+- 缺点：部署维护成本、引入重依赖
+- 适合：团队协作、实验量 1000+
+
+#### E. Hydra-Style Compose
+
+**代表**：Hydra config groups、hydra-zen、Beacon `compose_hierarchy`
+
+```yaml
+# config group: computation/fib_retracement
+defaults:
+  - base
+  - override: tight
+```
+
+- 优点：声明式组合、自动覆盖、config 继承
+- 缺点：引入框架约束、学习成本
+- 适合：参数维度多（10+）、需要组合爆炸管理
+
+### 7.3 选型决策
+
+**当前选定方案 A（JSON manifest）**，理由：
+
+1. 与现有目录结构天然契合（`computation/{algo}/{compute_id}/`）
+2. 不引入新依赖（项目当前无 MLflow/Hydra）
+3. DuckDB 可直接 `read_json('*/manifest.json')` 批量查询
+4. 可平滑演进：manifest 数据可作为 runs 表的数据源（方案 B 升级路径）
+
+**升级路径**：
+
+```
+阶段 1（当前）: manifest.json per directory
+    ↓ 实验量增长
+阶段 2: manifest.json + 汇总到 DuckDB runs 表（自动 ingest）
+    ↓ 需要团队协作/UI
+阶段 3: 引入 MLflow Tracking Server（manifest 作为 artifact 保留）
+```
+
+### 7.4 参考链接
+
+- [expbox](https://github.com/mizuno-group/expbox) — 轻量本地实验盒子，Git-anchored + config snapshot
+- [Beacon](https://pypi.org/project/beacon-python/) — Hydra 风格组合 + SQLite tracking，MultiScope 命名空间隔离
+- [hydra-zen](https://github.com/mit-ll-responsible-ai/hydra-zen/) — 无 YAML 的 Hydra，Python dataclass 生成配置
+- [config_spec](https://github.com/dibyaghosh/config_spec) — 轻量 JSON-serializable config，类似 Hydra instantiate

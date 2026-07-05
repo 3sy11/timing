@@ -67,14 +67,15 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
         if up_legs: merged.append(merge_legs_weighted(up_legs))
         if down_legs: merged.append(merge_legs_weighted(down_legs))
         groups = fit_fib_groups(merged, ratios=cfg.std_ratios)
-        all_groups.extend(groups)
+        for g in groups:
+            all_groups.append((mult, g))
     result_records = []
-    for g in all_groups:
-        result_records.append({"direction": g.direction, "score": g.score,
+    for mult, g in all_groups:
+        result_records.append({"multiplier": mult, "direction": g.direction, "score": g.score,
                                "leg_start_ts": g.leg.start_ts, "leg_end_ts": g.leg.end_ts,
                                "leg_low": g.leg.low, "leg_high": g.leg.high,
                                "levels_json": json.dumps(g.levels)})
-    result_df = pd.DataFrame(result_records) if result_records else pd.DataFrame(columns=["direction", "score", "leg_start_ts", "leg_end_ts", "leg_low", "leg_high", "levels_json"])
+    result_df = pd.DataFrame(result_records) if result_records else pd.DataFrame(columns=["multiplier", "direction", "score", "leg_start_ts", "leg_end_ts", "leg_low", "leg_high", "levels_json"])
     writer.write_result(result_df)
 
     log.info(f'[fib_retracement] 管道完成: klines={len(klines)} legs={len(all_legs_records)} groups={len(all_groups)}')

@@ -4,7 +4,14 @@
 又兼容 bollydog create_from 的 svc.config = dict 约定。
 通过 RetracementConfig(**any_dict) 构造时，未知 key 保留在 dict 中，
 缺省 key 自动填充默认值。
+
+支持 Profile 加载：profiles/{name}.toml 覆盖 DEFAULTS，CLI override 再覆盖 profile。
 """
+import os
+import tomllib
+import logging
+
+log = logging.getLogger(__name__)
 
 DEFAULTS = {
     "pivot_windows": [[5, 5], [8, 8]],
@@ -25,6 +32,41 @@ DEFAULTS = {
     "scan_bars": 0, "min_bars": 200,
 }
 
+PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")
+
+
+def load_profile(name: str) -> dict:
+    """加载 profiles/{name}.toml，返回参数 dict。文件不存在则返回空 dict。"""
+    path = os.path.join(PROFILES_DIR, f"{name}.toml")
+    if not os.path.isfile(path):
+        log.debug(f'[配置] profile 不存在，使用纯 DEFAULTS: {path}')
+        return {}
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+    log.info(f'[配置] 加载 profile: {path} ({len(data)} keys)')
+    return data
+
+
+def parse_overrides(overrides: list[str] | None) -> dict:
+    """解析 CLI --override 参数列表，如 ["recent_bars=120", "top_n=8"]。"""
+    if not overrides:
+        return {}
+    result = {}
+    for item in overrides:
+        if "=" not in item:
+            log.warning(f'[配置] 忽略无效 override (缺少=): {item}')
+            continue
+        key, val_str = item.split("=", 1)
+        key = key.strip()
+        val_str = val_str.strip()
+        # 尝试转换类型
+        try:
+            import json
+            result[key] = json.loads(val_str)
+        except (json.JSONDecodeError, ValueError):
+            result[key] = val_str
+    return result
+
 
 class RetracementConfig(dict):
     """dict 子类，支持属性访问。框架 svc.config = dict 后仍可 cfg.pivot_windows。"""
@@ -33,9 +75,33 @@ class RetracementConfig(dict):
         merged = {**DEFAULTS, **kwargs}
         super().__init__(merged)
 
+    @classmethod
+    def from_profile(cls, profile_name: str, overrides: list[str] | None = None) -> "RetracementConfig":
+        """从 profile + overrides 构造配置。优先级：DEFAULTS < profile < overrides。"""
+        profile_data = load_profile(profile_name)
+        override_data = parse_overrides(overrides)
+        merged = {**DEFAULTS, **profile_data, **override_data}
+        cfg = cls(**merged)
+        cfg._profile_name = profile_name
+        cfg._profile_data = profile_data
+        cfg._override_data = override_data
+        return cfg
+
+    @property
+    def config_source(self) -> dict:
+        """返回配置来源元信息，用于 manifest 记录。"""
+        return {
+            "profile": getattr(self, "_profile_name", None),
+            "profile_path": os.path.join(PROFILES_DIR, f"{getattr(self, '_profile_name', '')}.toml")
+                if getattr(self, "_profile_name", None) else None,
+            "overrides": getattr(self, "_override_data", {}),
+        }
+
     def __getattr__(self, key):
-        try: return self[key]
-        except KeyError: raise AttributeError(f"RetracementConfig has no key '{key}'")
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(f"RetracementConfig has no key '{key}'")
 
     def __setattr__(self, key, value):
         self[key] = value

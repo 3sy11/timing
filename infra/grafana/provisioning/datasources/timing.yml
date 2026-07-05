@@ -2,8 +2,9 @@ apiVersion: 1
 
 datasources:
   - name: TimingDuckDB
-    type: frser-sqlite-datasource
+    type: motherduck-duckdb-datasource
     access: proxy
-    url: /data/timing/timing.duckdb
     isDefault: true
     editable: true
+    jsonData:
+      path: ":memory:"
