@@ -1,12 +1,10 @@
 services:
   grafana:
-    image: grafana/grafana:11.6.16-ubuntu
+    image: grafana/grafana:13.1.0-ubuntu
     ports:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=timing
-      - GF_PLUGINS_PREINSTALL=frser-sqlite-datasource,marcusolsson-json-datasource
-      - GF_PLUGINS_PREINSTALL_ASYNC=true
       - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=motherduck-duckdb-datasource
       - GF_DATABASE_PATH=/warehouse/timing/grafana.db
     volumes:
