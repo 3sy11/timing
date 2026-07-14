@@ -1,0 +1,2 @@
+# 集成服务配置（用于 execute 模式导入数据）
+["timing.integration.app.IntegrationService"]

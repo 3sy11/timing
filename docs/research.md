@@ -683,14 +683,21 @@ timing/
 │       ├── __init__.py
 │       └── fib.py              # decide(signal, position, cfg) → Decision
 │
+├── exchange/                    # ══ 交易所服务（独立模块）══
+│   ├── __init__.py
+│   ├── app.py                  # ExchangeService(AppService) — 交易所接口
+│   │                           #   alias = "ExchangeService"
+│   │                           #   提供 submit_order / check_pending / cancel_order
+│   └── mock.py                 # SimExchange — 模拟撮合引擎（默认交易所）
+│
 ├── execution/                   # ══ 执行服务 ══
 │   ├── __init__.py
-│   ├── app.py                  # ExecutionService(AppService) — Broker 编排
+│   ├── app.py                  # ExecutionService(AppService) — 编排层
 │   │                           #   alias = "ExecutionService"
 │   │                           #   commands = ["timing.execution.command"]
-│   │                           #   on_decision → execute → 写 orders/fills/positions
-│   ├── command.py              # 手动触发类命令
-│   └── exchange.py             # SimExchange（模拟撮合引擎）
+│   ├── command.py              # Execute(execution_id, decision_id, exchange)
+│   ├── runner.py               # run_execution(decisions, klines, exchange) 纯函数
+│   └── writer.py               # ExecutionWriter → execution/{id}/*.parquet
 │
 ├── common/                      # ══ 公共工具（非服务）══
 │   ├── __init__.py
@@ -707,9 +714,11 @@ timing/
 │   ├── structures/{compute_id}/
 │   ├── signals/{analysis_id}/
 │   ├── decisions/{decision_id}/
-│   ├── orders/{execution_id}/
-│   ├── fills/{execution_id}/
-│   └── positions/{execution_id}/
+│   └── execution/{execution_id}/
+│       ├── orders.parquet
+│       ├── fills.parquet
+│       ├── positions.parquet
+│       └── manifest.json
 │
 └── config.toml                  # 主配置（声明服务 + 实验参数）
 ```
@@ -723,7 +732,8 @@ timing/
 | ComputationService | `ComputeIndicators`, `ComputeStructure` | CLI execute / 事件 |
 | AnalysisService | `RerunDetect` | CLI execute（手动重跑） |
 | DecisionService | (暂无) | — |
-| ExecutionService | (暂无) | — |
+| ExchangeService | — | （提供撮合接口，无 CLI 命令） |
+| ExecutionService | `Execute` | CLI execute |
 
 ### 服务运行模式
 
@@ -734,7 +744,8 @@ timing/
 | ComputationService | 监听数据变更自动算 | 手动触发计算 |
 | AnalysisService | 监听 bar 事件 → detect | — |
 | DecisionService | 监听 signal 事件 → decide | — |
-| ExecutionService | 监听 decision 事件 → execute | — |
+| ExchangeService | 常驻提供撮合接口 | — |
+| ExecutionService | 监听 decision 事件 → execute | 手动触发回测 |
 
 ### config.toml 示例
 
@@ -777,12 +788,17 @@ analysis_id = "ret_v1"
 min_strength = 0.6
 position_size = 0.1
 
+[services.exchange]
+module = "timing.exchange.app.ExchangeService"
+initial_balance = 100_000.0
+slippage_pct = 0.001
+commission_rate = 0.001
+
 [services.execution]
 module = "timing.execution.app.ExecutionService"
 execution_id = "sim_001"
 decision_id = "fib_v1"
 exchange = "sim"
-commission_rate = 0.001
 ```
 
 ---

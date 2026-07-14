@@ -1,0 +1,4 @@
+# 计算服务配置（用于 execute 模式）
+["timing.integration.app.IntegrationService"]
+
+["timing.computation.app.ComputationService"]

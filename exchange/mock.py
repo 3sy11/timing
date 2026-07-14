@@ -1,7 +1,6 @@
 """SimExchange — 模拟交易所纯撮合引擎。
 
-不再依赖 Pydantic 模型，接收和返回 dict。
-Market 单按 close ± slippage 立即成交；Limit/Stop 挂单后续 bar 检查触发。
+Market 单按 close +/- slippage 立即成交；Limit/Stop 挂单后续 bar 检查触发。
 """
 import uuid, logging
 
@@ -29,7 +28,6 @@ class SimExchange:
             return self._fill_market(order, bar)
         self._pending_orders.append(order)
         order["status"] = "submitted"
-        log.info(f'[SimExchange] 挂单 {order["order_type"]} {order["side"]} {order["symbol"]} qty={order["quantity"]} px={order["price"]}')
         return None
 
     def check_pending(self, bar: dict) -> list[dict]:
@@ -54,7 +52,6 @@ class SimExchange:
             if o["order_id"] == order_id:
                 self._pending_orders.pop(i)
                 o["status"] = "canceled"
-                log.info(f'[SimExchange] 撤单 {order_id}')
                 return True
         return False
 
@@ -71,7 +68,6 @@ class SimExchange:
         order["filled_quantity"] = order["quantity"]
         order["commission"] = commission
         order["filled_at"] = bar.get("ts", 0)
-        log.info(f'[SimExchange] {order["side"]} {order["symbol"]} qty={order["quantity"]} px={fill_price:.4f} fee={commission:.4f}')
         return {"order_id": order["order_id"], "symbol": order["symbol"], "side": order["side"],
                 "filled_price": fill_price, "filled_quantity": order["quantity"],
                 "commission": commission, "ts": bar.get("ts", 0)}
