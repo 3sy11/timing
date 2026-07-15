@@ -32,9 +32,9 @@ def _resolve_source(path: str):
 def _ts_to_ms(s: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(s):
         n = pd.to_numeric(s, errors="coerce").astype("float64")
-        return (n.where(n > 1e12, n * 1000)).astype("int64")
+        return n.where(n > 1e12, n * 1000)
     t = pd.to_datetime(s, errors="coerce").astype("datetime64[ns]")
-    return (t.astype("int64") // 1_000_000).astype("int64")
+    return (t.astype("int64") // 1_000_000).astype("float64")
 
 
 def _apply_meta(df: pd.DataFrame, meta: Dict[str, str]) -> pd.DataFrame:
@@ -60,7 +60,8 @@ def read_file(path: str) -> List[dict]:
     """duckdb 读文件 → 标准化 OHLCV → list[dict]。"""
     data_dir, glob, reader = _resolve_source(path)
     meta = _read_meta(data_dir)
-    sql = f"SELECT * FROM {reader}('{glob}')"
+    opts = ", union_by_name=true" if reader == "read_parquet" else ""
+    sql = f"SELECT * FROM {reader}('{glob}'{opts})"
     with duckdb.connect() as conn:
         df = conn.sql(sql).df()
     log.info(f"[integration] read {glob} rows={len(df)} meta={bool(meta)}")
@@ -73,5 +74,7 @@ def read_file(path: str) -> List[dict]:
         df["volume"] = pd.to_numeric(df["volume"].astype(str).str.replace(",", "", regex=False), errors="coerce").fillna(0.0).astype("float64")
     else:
         df["volume"] = 0.0
+    df = df.dropna(subset=["ts", "close"]).copy()
+    df["ts"] = df["ts"].astype("int64")
     df = df.drop_duplicates(subset=["ts"], keep="last").sort_values("ts").reset_index(drop=True)
     return df.to_dict("records")

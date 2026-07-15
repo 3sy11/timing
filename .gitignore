@@ -17,3 +17,6 @@ notebook/
 .idea/
 scripts/
 cache/
+temp/
+tmp/
+infra/
