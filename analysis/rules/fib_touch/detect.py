@@ -176,13 +176,19 @@ def check_breakout(close: float, groups: List[FibGroup],
 
 
 def run_detection(klines: List[dict], groups: List[FibGroup],
-                  cfg: FibTouchConfig = None) -> dict:
-    """批量扫描 K 线，产出信号 + 突破 + 摘要。Rule 的检测入口函数。"""
+                  cfg: FibTouchConfig = None,
+                  groups_resolver=None) -> dict:
+    """批量扫描 K 线，产出信号 + 突破 + 摘要。Rule 的检测入口函数。
+    groups_resolver: 可选 callable(bar_ts) -> List[FibGroup]，提供时间感知的动态 groups。
+    若提供则忽略静态 groups 参数。
+    """
     cfg = cfg or FibTouchConfig()
     from computation.algo.fib_retracement.algo import base_df
     df = base_df(klines)
     n = len(df)
-    if n == 0 or not groups:
+    if n == 0:
+        return {"signals": [], "breakouts": [], "summary": _empty_summary()}
+    if not groups_resolver and not groups:
         return {"signals": [], "breakouts": [], "summary": _empty_summary()}
     start = max(0, n - cfg.scan_bars) if cfg.scan_bars > 0 else 0
     closes_list = df["close"].tolist()
@@ -193,12 +199,16 @@ def run_detection(klines: List[dict], groups: List[FibGroup],
     col_locs = {c: df.columns.get_loc(c) for c in cols}
     for i in range(start, n):
         close_i = closes_list[i]
+        bar_ts = int(df.iat[i, ts_loc])
+        cur_groups = groups_resolver(bar_ts) if groups_resolver else groups
+        if not cur_groups:
+            continue
         bar = {c: df.iat[i, col_locs[c]] for c in cols}
-        sigs = score_bar_signals(close_i, bar, closes_list[:i + 1], df, groups, i, touch_history, cfg=cfg)
+        sigs = score_bar_signals(close_i, bar, closes_list[:i + 1], df, cur_groups, i, touch_history, cfg=cfg)
         all_signals.extend(sigs)
-        broken = check_breakout(close_i, groups, cfg=cfg)
+        broken = check_breakout(close_i, cur_groups, cfg=cfg)
         for b in broken:
-            b.update({"bar_idx": i, "ts": int(df.iat[i, ts_loc]), "close": close_i})
+            b.update({"bar_idx": i, "ts": bar_ts, "close": close_i})
         all_breakouts.extend(broken)
     strong = sum(1 for s in all_signals if s["score"] >= cfg.strong_threshold)
     medium = sum(1 for s in all_signals if cfg.medium_threshold <= s["score"] < cfg.strong_threshold)

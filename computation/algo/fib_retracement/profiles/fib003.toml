@@ -1,0 +1,12 @@
+# fib003 — 长期稳健：大窗口+高阈值，只保留显著趋势
+pivot_windows = [[8, 8], [13, 13]]
+zigzag_thresholds = [0.08, 0.15]
+regression_windows = [80, 150]
+recent_bars = 150
+skip_recent = 15
+min_leg_span_pct = 0.05
+top_n = 4
+cluster_tolerance_pct = 0.008
+min_cluster_conf = 0.5
+scan_bars = 20
+min_bars = 200

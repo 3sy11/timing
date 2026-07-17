@@ -1,0 +1,12 @@
+# fib001 — 短期敏感：小窗口+低阈值，捕捉短期波动
+pivot_windows = [[3, 3], [5, 5]]
+zigzag_thresholds = [0.03, 0.05]
+regression_windows = [30, 60]
+recent_bars = 60
+skip_recent = 5
+min_leg_span_pct = 0.02
+top_n = 8
+cluster_tolerance_pct = 0.003
+min_cluster_conf = 0.2
+scan_bars = 20
+min_bars = 200

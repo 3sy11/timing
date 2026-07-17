@@ -1,0 +1,12 @@
+# fib005 — 超长周期：大窗口+大回溯，识别大级别回撤
+pivot_windows = [[13, 13], [21, 21]]
+zigzag_thresholds = [0.10, 0.20]
+regression_windows = [100, 200]
+recent_bars = 200
+skip_recent = 20
+min_leg_span_pct = 0.08
+top_n = 4
+cluster_tolerance_pct = 0.015
+min_cluster_conf = 0.6
+scan_bars = 20
+min_bars = 200

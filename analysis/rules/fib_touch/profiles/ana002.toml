@@ -1,0 +1,18 @@
+# ana002 — 标准/均衡: 适中容差和阈值
+touch_tolerance = 10.0
+cooldown_bars = 5
+approach_lookback = 5
+history_lookback_bars = 200
+volume_lookback = 20
+volume_threshold = 1.5
+breakout_tolerance = 15.0
+w_consensus = 2.0
+w_bounce_rate = 1.5
+w_touch_count = 0.1
+w_volume = 1.0
+w_counter_trend = 0.5
+w_candle = 1.0
+strong_threshold = 5.0
+medium_threshold = 3.5
+weak_threshold = 2.0
+scan_bars = 0

@@ -6,8 +6,9 @@ Protocol 子类，可被 mock 替换用于测试。
 import os
 import json
 import logging
+from bisect import bisect_right
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Dict, Tuple
 
 import duckdb
 import pandas as pd
@@ -27,28 +28,49 @@ class AnalysisProtocol(Protocol):
     async def on_start(self) -> None:
         log.info(f'[分析Protocol] warehouse={self.warehouse_path}')
 
-    def read_structures(self, algo: str, compute_id: str,
-                        symbol: str, interval: str) -> List[FibGroup]:
+    def read_structures_timeseries(self, algo: str, compute_id: str,
+                                   symbol: str, interval: str) -> Tuple[List[int], Dict[int, List[FibGroup]]]:
+        """读取时间序列 result.parquet，返回 (sorted_ts_list, {effective_ts: [FibGroup...]})。"""
         path = os.path.join(self.warehouse_path, "computation", algo,
                             compute_id, symbol, interval, "result.parquet")
         if not os.path.isfile(path):
             log.warning(f'[分析] 结构文件不存在: {path}')
-            return []
-        rows = duckdb.sql(
-            f"SELECT multiplier, direction, score, leg_start_ts, leg_end_ts, "
-            f"leg_low, leg_high, levels_json FROM read_parquet('{path}') "
-            f"ORDER BY score DESC"
-        ).fetchall()
-        groups = []
+            return [], {}
+        with duckdb.connect() as conn:
+            rows = conn.execute(
+                f"SELECT effective_ts, multiplier, direction, score, leg_start_ts, leg_end_ts, "
+                f"leg_low, leg_high, levels_json FROM read_parquet('{path}') "
+                f"ORDER BY effective_ts, multiplier, score DESC"
+            ).fetchall()
+        ts_groups: Dict[int, List[FibGroup]] = {}
         for row in rows:
-            multiplier, direction, score, start_ts, end_ts, low, high, levels_json = row
+            eff_ts, multiplier, direction, score, start_ts, end_ts, low, high, levels_json = row
+            eff_ts = int(eff_ts)
             leg = TrendLeg(start_idx=0, end_idx=0, start_ts=int(start_ts),
                            end_ts=int(end_ts), low=float(low), high=float(high),
                            direction=direction)
             levels = [(float(r), float(p)) for r, p in json.loads(levels_json)]
-            groups.append(FibGroup(leg=leg, levels=levels, score=float(score),
-                                   direction=direction))
-        return groups
+            g = FibGroup(leg=leg, levels=levels, score=float(score), direction=direction)
+            ts_groups.setdefault(eff_ts, []).append(g)
+        sorted_ts = sorted(ts_groups.keys())
+        log.info(f'[分析] 读取结构时间序列: {len(sorted_ts)} 个时间点, {len(rows)} 条记录')
+        return sorted_ts, ts_groups
+
+    def get_groups_at(self, sorted_ts: List[int], ts_groups: Dict[int, List[FibGroup]],
+                      bar_ts: int) -> List[FibGroup]:
+        """根据 bar 时间戳找到对应的 fib groups（effective_ts <= bar_ts 的最新一组）。"""
+        idx = bisect_right(sorted_ts, bar_ts) - 1
+        if idx < 0:
+            return []
+        return ts_groups[sorted_ts[idx]]
+
+    def read_structures(self, algo: str, compute_id: str,
+                        symbol: str, interval: str) -> List[FibGroup]:
+        """兼容旧接口：返回最新一组 groups。"""
+        sorted_ts, ts_groups = self.read_structures_timeseries(algo, compute_id, symbol, interval)
+        if not sorted_ts:
+            return []
+        return ts_groups[sorted_ts[-1]]
 
     def read_klines(self, symbol: str, interval: str) -> List[dict]:
         klines_dir = os.path.join(self.warehouse_path, "klines", symbol, interval)

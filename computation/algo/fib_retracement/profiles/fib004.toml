@@ -1,0 +1,12 @@
+# fib004 — 宽松聚类：放宽聚类容差，挖掘更多支撑阻力区间
+pivot_windows = [[5, 5], [10, 10]]
+zigzag_thresholds = [0.04, 0.08]
+regression_windows = [40, 80]
+recent_bars = 120
+skip_recent = 8
+min_leg_span_pct = 0.025
+top_n = 10
+cluster_tolerance_pct = 0.012
+min_cluster_conf = 0.15
+scan_bars = 20
+min_bars = 200
