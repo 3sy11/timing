@@ -23,8 +23,9 @@ def run_strategy(signals: list[dict], strategy_meta: dict, cfg: dict,
                 break
         base = {"decision_id": decision_id, "analysis_id": analysis_id,
                 "symbol": symbol, "ts": signal.get("ts", 0),
-                "direction": signal.get("direction", ""), "strength": signal.get("strength", 0),
-                "price": signal.get("price", signal.get("touch_price", 0))}
+                "direction": signal.get("direction", ""),
+                "strength": signal.get("score", signal.get("strength", 0)),
+                "price": signal.get("level_price", signal.get("close", signal.get("price", 0)))}
         if passed:
             order_params = sizing(signal, ctx, cfg)
             decisions.append({**base, "action": "submit", "side": order_params.get("side", ""),

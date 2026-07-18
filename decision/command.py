@@ -51,23 +51,18 @@ class Decide(BaseCommand):
         return summary
 
     def _load_signals(self, warehouse: str) -> list[dict]:
-        import glob as g
-        pattern = f"{warehouse}/signals/{self.analysis_id}/**/*.parquet"
-        files = g.glob(pattern, recursive=True)
-        if not files:
-            pattern2 = f"{warehouse}/signals/{self.analysis_id}/*.parquet"
-            files = g.glob(pattern2)
-        if not files:
+        import os
+        if self.symbol and self.interval:
+            read_path = os.path.join(warehouse, "signals", self.analysis_id,
+                                     self.symbol, self.interval, "signals.parquet")
+        else:
+            read_path = f"{warehouse}/signals/{self.analysis_id}/**/*.parquet"
+        if not os.path.exists(read_path) and "**" not in read_path:
+            log.warning(f'[决策] 信号文件不存在: {read_path}')
             return []
-        read_path = f"{warehouse}/signals/{self.analysis_id}/**/*.parquet"
         try:
             with duckdb.connect() as conn:
-                sql = f"SELECT * FROM read_parquet('{read_path}', union_by_name=true)"
-                if self.symbol:
-                    sql += f" WHERE symbol = '{self.symbol}'"
-                if self.interval:
-                    sql += f" {'AND' if self.symbol else 'WHERE'} interval = '{self.interval}'"
-                sql += " ORDER BY ts"
+                sql = f"SELECT * FROM read_parquet('{read_path}', union_by_name=true) ORDER BY ts"
                 return conn.execute(sql).fetchdf().to_dict("records")
         except Exception as e:
             log.error(f'[决策] 读取 signals 失败: {e}')
