@@ -85,3 +85,40 @@ compute_id → analysis_id → decision_id → execution_id
 1. **P1**: Decision rules profile 机制（使实验可复现）
 2. **P2**: 目录结构对齐 `strategies/` → `rules/`
 3. **P3**: 公共基类抽取 + schema 校验
+
+---
+
+## 待研究项
+
+### Computation: Fib 重算触发机制
+
+当前 `scan_bars` 按固定步长重算，不考虑市场状态。但直觉上：
+
+- 一组 Fib 线被**突破**（价格穿出 leg 范围）后，该组线已失效，应触发重算
+- 震荡趋势中 Fib 回撤有效；一旦突破进入单边行情，回撤策略可能失效
+- 需要区分"回撤中的正常触碰"和"突破导致的失效"
+
+**待设计**：
+- [ ] 突破检测 → 标记 group 失效 → 触发重算
+- [ ] 重算策略：失效后立即重算 vs 等待新拐点确认后再算
+- [ ] 突破阈值：price > leg_high + tolerance 还是 price > 某个百分比
+
+### Decision: 概率估计模型（方案 C）
+
+用历史数据估计 `P(win) = f(bounce_rate, proximity, freshness, ...)`。
+
+- 优点：数据驱动，精确
+- 风险：样本量不足时过拟合（当前高 bounce_rate 样本仅 165 个）
+- 待研究：是否有足够数据支持简单的逻辑回归 / 决策树模型
+- [ ] 收集更多标的数据扩充样本
+- [ ] 简单模型 vs 条件门禁的对比实验
+
+### Decision: 期望收益模型（方案 D）
+
+`E[R] = P(win) × avg_win - P(loss) × avg_loss > 0`
+
+- 需要同时估计 P(win)、avg_win、avg_loss
+- 可结合 MFE/MAE 分布来估计盈亏幅度
+- 比纯胜率更合理：一个 40% 胜率但盈亏比 3:1 的策略好于 60% 胜率盈亏比 1:2 的
+- [ ] 研究不同条件组合下的 MFE/MAE 分布特征
+- [ ] 用期望收益替代胜率作为决策依据的可行性验证

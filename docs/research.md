@@ -6,95 +6,40 @@
 
 ## 0. Computation 模块 — fib_retracement 参数设计
 
-### 0.1 Fib Group 有效性判定（当前逻辑）
+**设计决策 [P0]**：Computation 保留宽松输出，不做硬过滤。下游（Analysis/Decision）负责质量判定。
 
-一组 Fib 线从产出到最终使用经过以下链路：
+### 0.1 简化后的可控变量（3 个）
 
-```
-拐点检测 → 置信度融合 → 聚类 → 趋势腿提取 → 排序筛选 → 加权合并 → 生成 FibGroup
-```
+Computation 模块输出的 Fib Group 质量由大量内部参数决定，但对实验者暴露的核心旋钮应精简为 **3 个**：
 
-#### 拐点检测的规则条件
+| 变量 | 含义 | 控制什么 | 参考范围 |
+|------|------|------|------|
+| `recent_bars` | 回溯窗口（乘以 1/2/3 得到三组时间尺度） | Fib 线覆盖的历史深度 | 60~200 |
+| `min_leg_span_pct` | 最小波段幅度 | 过滤过窄波段 | 0.03~0.10 |
+| `scan_bars` | 滑动步长（0=只算最新点） | 输出的时间粒度 | 10~30 |
 
-**三种独立方法并行检测拐点**：
+其余参数（pivot_windows, zigzag_thresholds, regression_windows, weights, top_n 等）作为内部实现固定或走 profile 预设，**不作为实验变量**。
 
-| 方法 | 参数 | 规则 |
-|------|------|------|
-| Pivot | `pivot_windows=[[5,5],[8,8]]` | bar.high ≥ 窗口内所有 high（左右各 N 根） |
-| Zigzag | `zigzag_thresholds=[0.05,0.10]` | 反向运动幅度 ≥ threshold 才确认拐点 |
-| Regression | `regression_windows=[50,100]` | 收盘价残差 > 2σ 偏离线性回归 |
-
-**置信度融合**：每个方法命中则加对应权重，最终得到 `conf_high / conf_low ∈ [0, 1]`。
-
-#### 趋势腿提取的规则条件
-
-从 `conf > 0` 的点中两两配对（low→high 或 high→low）：
-1. `idx_b - idx_a ≥ 3` — 腿至少跨 3 根 bar
-2. `span_pct ≥ min_leg_span_pct` — 波段幅度 ≥ 阈值（fib001=2%, fib003=5%）
-
-#### 排序评分（score_and_rank）
+### 0.2 Fib Group 生成规则（精简版）
 
 ```
-final_score = span_pct × conf_score × recency × length_penalty
+输入: K线序列
+步骤:
+  1. 三种方法（Pivot/Zigzag/Regression）检测拐点 → 置信度融合
+  2. 按 recent_bars × (1,2,3) 三个窗口分别提取趋势腿
+  3. 过滤: span_pct < min_leg_span_pct 的腿丢弃
+  4. 评分排序 → top_n → 加权合并同方向腿 → FibGroup
+  5. 每隔 scan_bars 根 bar 重新计算一次
+输出: 每个计算点 × 3窗口 × (up/down) → 最多6组 FibGroup
 ```
 
-其中：
-- `span_pct`：波段幅度百分比（越大越好）
-- `conf_score`：起止点的置信度之和 + 聚类 bonus
-- `recency`：`end_idx / max_idx`（越新越好）
-- `length_penalty`：占全量数据 >60% 的超长腿打折
+每个 FibGroup 带有 `score` 字段（`span_pct × conf × recency`），由 Analysis 层自行决定如何使用。
 
-排序后取 `top_n`（fib001=8），up/down 各半，去重嵌套腿。
+### 0.3 案例：为何 score=0.08 的 group 被保留
 
-#### 加权合并
-
-同方向 top 腿按 conf_score 做加权平均，合并为 1 条最终腿 → 生成 FibGroup。
-
-#### 关键结论
-
-**当前没有任何"有效性门禁"**：只要 span_pct 达标且 top_n 有空位，任何腿都会被保留。最终 group 的 score 可以非常低（如 0.08 / 0.003），这些低质量 group 直接传给 analysis 模块使用。
-
----
-
-### 0.2 案例分析：score=0.08 的 group
-
-2018-05-29 计算点产出的唯一 group：
-- `leg_low=3493, leg_high=3580`，range=87 点（仅 2.5%）
-- 5 条回撤线全部挤在 3511~3559 的 48 点区间内
-- 2018-09-10 K线 close=3528.9，**落在 5 条线中间**，touch_tolerance=20 导致同时"触碰"多条线
-- 该 group score=0.08 极低，但无任何过滤机制阻止它产出信号
-
-#### 问题根因
-
-| 层级 | 问题 |
-|------|------|
-| Computation | `min_leg_span_pct=0.02` 允许了极窄波段（87 点 / 2.5%），导致 levels 过于密集 |
-| Computation | 没有 score 下限，极低质量 group 也进入输出 |
-| Analysis | `touch_tolerance=20`（固定点数）对窄波段来说覆盖了大半条腿 |
-| Analysis | 不区分 group quality，低分 group 的触碰和高分 group 一样计入信号 |
-
----
-
-### 0.3 Computation 参数设计研究
-
-#### 核心参数对信号质量的影响
-
-| 参数 | 当前值(fib001) | 影响 |
-|------|------|------|
-| `min_leg_span_pct` | 0.02 (2%) | 越低→越多窄波段→levels越密集→误触越多 |
-| `top_n` | 8 | 每步保留 8 条腿再合并，更多=更多噪声 |
-| `recent_bars` | 60 | 短期窗口，可能只覆盖小振荡 |
-| `min_cluster_conf` | 0.2 | 低阈值允许低置信度拐点进入聚类 |
-| `pivot_windows` | [[3,3],[5,5]] | 小窗口→短期噪声拐点多 |
-| `zigzag_thresholds` | [0.03, 0.05] | 低阈值→微幅振荡也识别为拐点 |
-
-#### 应该在 Computation 还是 Analysis 层解决？
-
-| 策略 | 做法 | 适用场景 |
-|------|------|------|
-| **源头把控** | 提高 `min_leg_span_pct` / 加 score 下限 | 从根本上减少低质量 group |
-| **下游过滤** | analysis 层按 group score 加权/过滤 | 保持 computation 通用性，让 analysis 自行选择 |
-| **混合** | computation 保留宽松输出 + analysis 用 group score 做信号权重 | 推荐 |
+- `leg=[3493,3580]`，span_pct=2.5%，刚过 `min_leg_span_pct=2%` 阈值
+- 7 条 levels 挤在 48 点内，任何 tolerance 都导致多条命中
+- **设计决策**：Computation 继续输出，由 Analysis 的方案 E（tolerance ∝ leg_range）自然过滤
 
 ---
 
@@ -165,131 +110,258 @@ std(100) = 13.85 (价格的 0.39%) — 100天长期波动
 
 ---
 
-### 1.2 Group Score 在信号中的作用
+### 1.2 Group Score 加权方案 [实施]
 
-#### 当前问题
+**设计决策**：tolerance ∝ leg_range + signal_score × group.score
 
-- 检测逻辑对所有 Fib Group 一视同仁：score=0.08 和 score=3.75 的 group 触碰时产出同等信号
-- 低分组来自窄波段，其 levels 过于密集，容易批量触发
-- 信号得分公式中没有引入 group quality 因子
+实施细节：
+```python
+dynamic_tolerance = (group.leg.high - group.leg.low) * tolerance_k  # k ∈ [0.05, 0.15]
+distance = abs(price - level_price)
+if distance > dynamic_tolerance:
+    continue  # 不产出信号
 
-#### Group Score 的实际含义
-
+proximity = 1.0 - distance / dynamic_tolerance  # [0, 1] 越近越高
+signal_quality = proximity * (group.score / score_normalizer)
 ```
-final_score = span_pct × conf_score × recency × length_penalty
-```
 
-- `span_pct` 大 → 大波段 → 回撤 levels 间距大 → 触碰更有意义
-- `conf_score` 高 → 拐点确认度高 → 波段识别更可靠
-- `recency` 高 → 近期波段 → 对当前行情更有参考价值
+效果：
+- 窄波段（87点）× 0.08 → tolerance=4.35, 且 quality 乘以 0.08 → 信号极弱
+- 宽波段（500点）× 2.5 → tolerance=25, 且 quality 乘以 2.5 → 信号强
 
-score 综合反映了"这组 Fib 线对当前行情的参考价值"。
+---
 
-#### 方案对比
+### 1.3 信号→订单转化：得分阈值的根本问题
 
-| 方案 | 描述 | 优点 | 缺点 |
+#### 实证：当前 score 无预测力
+
+用 ana001 (12,899 个信号) 对 885003.WI 做 5 日 forward return 验证：
+
+| 条件 | 样本 | 5日胜率 | 平均方向收益 |
 |------|------|------|------|
-| A. 硬阈值 | `if group.score < min_score: skip` | 简单直接 | 生硬；不同标的 score 分布不同 |
-| B. 分位数 | 只用 score top N% 的 groups | 自适应 | 依赖分布；不稳定 |
-| C. 乘性权重 | `signal_score *= group.score / max_score` | 不丢弃任何线，但低质量线自然弱化 | 需归一化 |
-| D. tolerance 关联 | `tolerance = leg_range × k`（方案 E） | 窄波段自动变严格 | 间接实现 |
-| E. 混合 | tolerance 关联 + score 乘性权重 | 双重自适应 | 参数交互 |
+| 全量 | 12,899 | 49.4% | -0.019% |
+| score ≥ 5（当前决策阈值） | 12,838 | 49.4% | -0.019% |
+| score [5,10) | 1,296 | **57.6%** | +0.081% |
+| score [15,20) | 3,703 | 47.6% | -0.018% |
+| score [25,33) | 2,551 | 48.0% | -0.035% |
 
-#### 讨论
+**结论：score 越高反而越差**。原因：高 score 主要由 `touch_count` 贡献（线被反复触碰→失效）。
 
-**不应单纯"过滤掉"低分 group**——图上的 Fib 线本身是合理的。问题是：
-1. 窄波段的 levels 太密集，tolerance 应该按波段宽度自适应（§1.1 方案 E）
-2. 低分 group 的触碰信号权重应该更低（方案 C）
+#### 真正有预测力的特征
 
-推荐组合：**tolerance ∝ leg_range + signal_score × group.score**
+| 特征 | 最佳分组 | 胜率 | 含义 |
+|------|------|------|------|
+| `bounce_rate ≥ 0.7` | 165 样本 | **63.0%** | 该 level 历史上 70%+ 的触碰产生了反弹 |
+| `distance < 0.1%` | 1,632 样本 | 52.3% | 真正"接触"到了线 |
+| `consensus ≤ 3` | 3,752 样本 | **55.9%** | 少组命中 = 大波段的单条线 |
+| `touch_count < 10` | 700 样本 | 53.3% | "新鲜"level，未被消耗 |
+
+#### 组合条件验证
+
+| 组合 | 样本 | 5日胜率 | MFE(20d) | MAE(20d) | R/R中位 |
+|------|------|------|------|------|------|
+| 全量 | 12,868 | 49.4% | +0.89% | -0.95% | 0.97 |
+| bounce≥0.5 & dist<0.3% & cons≤3 | 1,040 | **56.8%** | +0.80% | -0.64% | **1.57** |
+| bounce≥0.7 | 165 | **63.0%** | +1.16% | -0.94% | **3.03** |
+| bounce≥0.7 & dist<0.3% | 96 | **63.5%** | +0.89% | -0.74% | **3.00** |
+
+#### 关键发现
+
+1. **线性加权得分无用**：信号的"可执行性"不是各维度的加权总和
+2. **必要条件才是关键**：`bounce_rate ≥ 阈值` 是最强单一预测因子（从 49% → 63%）
+3. **物理含义**：bounce_rate 高 = 这条 level 在历史上真的起到了支撑/阻力作用
+4. **consensus 少反而好**：说明触碰的是大波段的重要线位，不是密集小波段的噪声
 
 ---
 
-### 1.3 信号得分逻辑重设计
+### 1.4 信号→订单的正确范式
 
-#### 当前公式的问题
+#### 对比：权重打分 vs 条件门禁 vs 概率模型
+
+| 范式 | 做法 | 问题 |
+|------|------|------|
+| A. 权重阈值（当前） | `weighted_sum > threshold → trade` | 无预测力；高分=噪声 |
+| B. 条件门禁 | 满足 N 个必要条件 → trade | 简单有效；但硬边界 |
+| C. 概率估计 | `P(win) = f(features) > threshold` | 需要大量数据训练；过拟合风险 |
+| D. 期望收益 | `E[R] = P(win)×avg_win - P(loss)×avg_loss > 0` | 最合理但估计困难 |
+| E. 条件门禁 + 仓位调节 | 门禁决定是否交易，特征决定仓位大小 | 平衡简单性和灵活性 |
+
+#### 推荐方案：条件门禁 + 信号强度分级（范式 B+E 混合）
+
+**为什么不用权重打分**：
+- 打分假设各特征线性可加且量纲可比 — 不成立
+- 无法表达"必要条件"语义（bounce_rate 低就不该交易，无论其他多好）
+- 实证证明高分不代表高质量
+
+**为什么不用概率模型**：
+- 样本量不足以训练可靠模型（尤其是高 bounce_rate 的样本仅 165 个）
+- 过拟合风险高
+- 黑盒，不可解释
+
+**推荐方案**：
+
+```
+决策 = 门禁过滤 + 分级执行
+
+门禁（全部满足才交易）:
+  1. proximity: distance / leg_range < tolerance_k (方案 E)
+  2. freshness: 该 level 的 bounce_rate ≥ min_bounce_rate
+  3. quality: group.score ≥ min_group_score (或通过 tolerance_k 隐式实现)
+
+分级（通过后决定仓位）:
+  - A 级: bounce_rate ≥ 0.7 & distance < 0.1% → 标准仓位
+  - B 级: bounce_rate ≥ 0.5 & distance < 0.3% → 半仓
+  - C 级: 其余通过门禁的 → 最小仓位或仅观察
+```
+
+#### 三个核心特征解释
+
+**Proximity（接近度）**
+
+衡量"价格离 Fib 线有多近"，归一化到 [0, 1]。
+
+```
+示例: Fib 线在 3546，tolerance = leg_range × 0.08 = 500 × 0.08 = 40
+  - close = 3540 → distance = 6 → proximity = 1 - 6/40 = 0.85 ← 很近
+  - close = 3520 → distance = 26 → proximity = 1 - 26/40 = 0.35 ← 较远
+  - close = 3500 → distance = 46 → proximity < 0 → 超出范围，不产出信号
+```
+
+物理含义：**"这根K线和 Fib 线有多亲密"**。0.9 = 几乎贴着线；0.5 = 在 tolerance 的一半位置。
+
+---
+
+**Bounce Rate（反弹率）**
+
+衡量"这条 Fib 线在过去是否真的起到了支撑/阻力作用"。
+
+```
+示例: 过去 200 根 bar 里，这条 Fib 线被价格触碰了 20 次
+  - 其中 14 次价格触碰后反转了 → bounce_rate = 14/20 = 0.70
+  - 含义：历史上 70% 的情况下，价格碰到这条线会弹回去
+
+对比:
+  - bounce_rate = 0.7 → 这条线"很硬"，真的有阻力效果 → 交易信号可信
+  - bounce_rate = 0.3 → 这条线"很虚"，价格碰到后大概率直接穿过 → 别在这交易
+```
+
+物理含义：**"这条线历史上管不管用"**。高 = 真正的支撑/阻力；低 = 纸老虎。
+
+---
+
+**Freshness（新鲜度）**
+
+用 `touch_count` 的反面来衡量——一条线被触碰的次数越多，它的"能量"越消耗。
+
+```
+示例:
+  - touch_count = 3 → freshness 高：这条线刚形成，市场对它的反应还未充分计价
+  - touch_count = 75 → freshness 低：这条线已被反复触碰，所有人都知道它在这里
+    → 支撑/阻力被"消耗"了，下次大概率被突破
+
+类比: 一块冰第一次被踩还很硬(fresh)，踩了 75 次后就碎了(exhausted)
+```
+
+物理含义：**"这条线还有没有剩余的支撑/阻力能量"**。新线价值高，老线已失效。
+
+---
+
+#### 与当前模块架构的映射
+
+| 模块 | 职责变化 |
+|------|------|
+| Analysis | 产出信号 + 携带特征（proximity, bounce_rate, touch_count 等） |
+| Decision | 条件门禁（替代 score 阈值）+ 分级仓位 |
+| Execution | 不变 |
+
+**信号不再需要"得分"**——它携带结构化特征，由 Decision 层用条件门禁做判定。
+
+
+---
+
+## 2. Decision 模块 — fib_gate 重设计
+
+### 2.1 当前问题
 
 ```python
-score = (groups_hit * w_consensus +
-         bounce_rate * w_bounce_rate +
-         touch_count * w_touch_count +
-         is_high_volume * w_volume +
-         is_counter_trend * w_counter_trend +
-         has_pattern * w_candle)
+# 当前决策逻辑
+if signal.score >= min_strength:  # 5.0
+    submit_order()
 ```
 
-问题：
-1. **线性叠加无必要条件**：touch_count=75 贡献 15 分就能凑出高分信号
-2. **维度量纲不统一**：bounce_rate ∈ [0,1]，touch_count ∈ [0,∞)，直接加权不合理
-3. **缺乏 group quality 因子**：不区分来自好波段还是坏波段的触碰
+这个方案被实证证伪：score 无预测力。
 
-#### 改进方向
+### 2.2 新方案：条件门禁
 
-**分层结构**：
-```
-1. 前置过滤（必要条件）
-   - 距离 ≤ dynamic_tolerance（方案 D/E）
-   - group.score ≥ min_threshold（或距离本身依赖 group 宽度）
+**Decision 的输入**不再是一个"分数"，而是信号携带的**结构化特征**：
 
-2. 基础得分 = f(距离, group_score)
-   - 越近得分越高（线性/指数衰减）
-   - group.score 作为乘数
-
-3. 加分项（归一化后叠加）
-   - 历史反弹率（0~1）
-   - 成交量确认（0/1）
-   - 多组共识（0~N）
-   - 逆势接近（0/1）
-```
-
-**距离衰减函数**（替代 tolerance 二值判定）：
 ```python
-distance_ratio = abs(price - level) / dynamic_tolerance
-if distance_ratio > 1.0:
-    return 0  # 超出范围
-proximity_score = 1.0 - distance_ratio  # 越近越高
+signal = {
+    "proximity": 0.85,         # 距离/tolerance 的反数 [0,1]
+    "bounce_rate": 0.72,       # 该 level 历史反弹率
+    "group_score": 1.5,        # 来源 group 的质量分
+    "consensus": 2,            # 命中组数
+    "touch_count": 8,          # 该 level 被触碰的历史次数
+    "direction": "up",
+    ...
+}
 ```
 
-这比当前的"在 tolerance 内=1，外=0"更合理。
+**门禁规则**（Decision 模块的核心逻辑）：
 
----
-
-### 1.4 K 线形态（Candle Pattern）
-
-#### Doji（十字星）
-
-技术分析中的一种 K 线形态：**收盘价 ≈ 开盘价**，实体极短，表示多空力量均衡/犹豫。通常出现在趋势转折点。
-
-常见变体：
-- 标准十字星：上下影线对称
-- 蜻蜓十字（T字线）：长下影、无上影 → 低位出现看涨
-- 墓碑十字（倒T线）：长上影、无下影 → 高位出现看跌
-
-当前判定（代码）：
 ```python
-if body < rng * 0.1:  # 实体 < 振幅 10%
-    patterns.append("doji")
+def should_trade(signal, cfg):
+    # 必要条件（全部满足）
+    if signal["proximity"] < cfg["min_proximity"]:       # 0.7
+        return False, "too_far"
+    if signal["bounce_rate"] < cfg["min_bounce_rate"]:   # 0.5
+        return False, "weak_level"
+    if signal["touch_count"] > cfg["max_touch_count"]:   # 50
+        return False, "exhausted_level"
+    return True, "passed"
+
+def compute_position_size(signal, cfg):
+    # 分级仓位
+    if signal["bounce_rate"] >= 0.7 and signal["proximity"] >= 0.9:
+        return cfg["full_size"]      # A级
+    elif signal["bounce_rate"] >= 0.5:
+        return cfg["half_size"]      # B级
+    return cfg["min_size"]           # C级
 ```
 
-**885003.WI 的数据问题**：O=H=L=C → rng=0 → 每根 bar 都是 doji。这是 close-only 数据的固有限制，candle pattern 维度对此类数据应直接跳过。
+### 2.3 可控变量（Decision 层）
 
----
-
-### 1.5 信号点 Y 轴位置
-
-用收盘价（close）作为信号点位置。信号本质是"这根 K 线接近了某条回撤线"，标记在 K 线上更直观。`level_price` 作为附加信息保留。
-
----
-
-## 2. Decision 模块 — fib_gate 参数设计
-
-（待补充）
+| 变量 | 含义 | 参考值 |
+|------|------|------|
+| `min_bounce_rate` | level 历史反弹率下限 | 0.5 |
+| `min_proximity` | 距离衰减后的接近度下限 | 0.7 |
+| `max_touch_count` | level 历史触碰上限（新鲜度） | 30~50 |
 
 ---
 
 ## 3. Execution 模块 — 模拟执行参数
 
 （待补充）
+
+---
+
+---
+
+## 4. 全链路参数总结
+
+### 可控变量清单
+
+| 层 | 变量 | 含义 | 实验范围 |
+|----|------|------|------|
+| Computation | `recent_bars` | 回溯窗口 | 60~200 |
+| Computation | `min_leg_span_pct` | 最小波段幅度 | 0.03~0.10 |
+| Computation | `scan_bars` | 滑动步长 | 10~30 |
+| Analysis | `tolerance_k` | tolerance = leg_range × k | 0.05~0.15 |
+| Decision | `min_bounce_rate` | level 历史反弹率下限 | 0.4~0.7 |
+| Decision | `min_proximity` | 距离衰减后接近度下限 | 0.5~0.9 |
+| Decision | `max_touch_count` | level 新鲜度上限 | 20~60 |
+
+共 7 个核心变量，覆盖从特征生产到交易决策的全链路。
 
 ---
 
@@ -320,4 +392,24 @@ score < 0.1: 222 个 (20%)
 score < 0.5: 901 个 (80%)
 score >= 1.0: 85 个 (7.5%)
 leg_pct < 3%: 420 个 (37%)
+```
+
+### A.3 信号预测力验证（ana001, 885003.WI, 5日 forward return）
+
+```
+score 分层胜率:
+  [0,5):   n=78    胜率=52.6%  ← 低分信号反而不差
+  [5,10):  n=1,296 胜率=57.6%  ← 最佳
+  [10,15): n=2,795 胜率=52.2%
+  [15,20): n=3,703 胜率=47.6%  ← 开始低于随机
+  [20,25): n=2,476 胜率=46.2%
+  [25,33): n=2,551 胜率=48.0%
+
+结论: 当前 score 越高预测越差 (touch_count 堆分 → level 已失效)
+
+有效特征:
+  bounce_rate ≥ 0.7:             胜率=63.0%, R/R中位=3.03
+  distance < 0.1%:               胜率=52.3%
+  consensus ≤ 3:                 胜率=55.9%
+  组合(bounce≥0.5,dist<0.3%,cons≤3): 胜率=56.8%, R/R中位=1.57
 ```
