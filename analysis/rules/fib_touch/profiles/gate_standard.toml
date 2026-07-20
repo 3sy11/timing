@@ -1,4 +1,4 @@
-# default profile — 等同 gate_standard
+# gate_standard — 标准: 均衡参数
 tolerance_k = 0.08
 min_leg_range_pct = 0.03
 cooldown_bars = 5

@@ -1,0 +1,9 @@
+# gate_loose — 宽松: 大容差捕捉更多触碰, 但过滤窄 leg
+tolerance_k = 0.12
+min_leg_range_pct = 0.03
+cooldown_bars = 3
+history_lookback_bars = 150
+volume_lookback = 10
+volume_threshold = 1.2
+breakout_tolerance_k = 0.03
+scan_bars = 0

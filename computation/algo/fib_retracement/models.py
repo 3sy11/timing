@@ -20,6 +20,7 @@ class FibGroup:
     levels: List[Tuple[float, float]]  # [(ratio, price), ...]
     score: float = 0.0
     direction: Literal["up", "down"] = "up"
+    multiplier: int = 0
 
     @property
     def best_h(self) -> float: return self.leg.high

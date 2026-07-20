@@ -9,22 +9,14 @@ import logging
 log = logging.getLogger(__name__)
 
 DEFAULTS = {
-    "touch_tolerance": 0.5,
+    "tolerance_k": 0.08,
+    "min_leg_range_pct": 0.03,
     "cooldown_bars": 5,
     "approach_lookback": 5,
     "history_lookback_bars": 200,
     "volume_lookback": 20,
     "volume_threshold": 1.5,
-    "breakout_tolerance": 1.0,
-    "w_consensus": 2.0,
-    "w_bounce_rate": 1.5,
-    "w_touch_count": 0.1,
-    "w_volume": 1.0,
-    "w_counter_trend": 0.5,
-    "w_candle": 1.0,
-    "strong_threshold": 5.0,
-    "medium_threshold": 3.5,
-    "weak_threshold": 2.0,
+    "breakout_tolerance_k": 0.02,
     "scan_bars": 0,
 }
 

@@ -44,13 +44,14 @@ class AnalysisProtocol(Protocol):
             ).fetchall()
         ts_groups: Dict[int, List[FibGroup]] = {}
         for row in rows:
-            eff_ts, multiplier, direction, score, start_ts, end_ts, low, high, levels_json = row
+            eff_ts, mult, direction, score, start_ts, end_ts, low, high, levels_json = row
             eff_ts = int(eff_ts)
             leg = TrendLeg(start_idx=0, end_idx=0, start_ts=int(start_ts),
                            end_ts=int(end_ts), low=float(low), high=float(high),
                            direction=direction)
             levels = [(float(r), float(p)) for r, p in json.loads(levels_json)]
-            g = FibGroup(leg=leg, levels=levels, score=float(score), direction=direction)
+            g = FibGroup(leg=leg, levels=levels, score=float(score),
+                         direction=direction, multiplier=int(mult))
             ts_groups.setdefault(eff_ts, []).append(g)
         sorted_ts = sorted(ts_groups.keys())
         log.info(f'[分析] 读取结构时间序列: {len(sorted_ts)} 个时间点, {len(rows)} 条记录')

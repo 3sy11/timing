@@ -1,0 +1,9 @@
+# gate_strict — 严格: 小容差 + 更高窄 leg 阈值
+tolerance_k = 0.05
+min_leg_range_pct = 0.04
+cooldown_bars = 8
+history_lookback_bars = 300
+volume_lookback = 30
+volume_threshold = 1.8
+breakout_tolerance_k = 0.015
+scan_bars = 0
