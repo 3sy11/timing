@@ -10,3 +10,11 @@ cluster_tolerance_pct = 0.005
 min_cluster_conf = 0.3
 scan_bars = 20
 min_bars = 200
+# 失效参数
+trend_min_move_pct = 0.01
+min_fit_score = 0.1
+invalidate_break_bars = 2
+invalidate_stale_ratio = 0.2
+invalidate_stale_tol_k = 0.08
+invalidate_score_pct = 0.2
+invalidate_check_interval = 5

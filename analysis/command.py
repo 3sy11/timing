@@ -38,7 +38,7 @@ class Analyze(BaseCommand):
         cfg = config_class.from_profile(profile_name, override_list)
 
         proto = app.protocol
-        sorted_ts, ts_groups = proto.read_structures_timeseries(
+        sorted_ts, ts_groups, invalids = proto.read_structures_timeseries(
             upstream_algo, self.compute_id, self.symbol, self.interval)
         if not sorted_ts:
             log.error(f'[分析] 无结构数据: {upstream_algo}/{self.compute_id}/{self.symbol}/{self.interval}')
@@ -50,7 +50,7 @@ class Analyze(BaseCommand):
             return None
 
         def groups_resolver(bar_ts):
-            return proto.get_groups_at(sorted_ts, ts_groups, bar_ts)
+            return proto.get_groups_at(sorted_ts, ts_groups, invalids, bar_ts)
 
         log.info(f'[分析] 开始检测 rule={self.rule} analysis_id={self.analysis_id} '
                  f'ts_points={len(sorted_ts)} klines={len(klines)}')

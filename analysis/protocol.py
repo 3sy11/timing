@@ -29,22 +29,26 @@ class AnalysisProtocol(Protocol):
         log.info(f'[分析Protocol] warehouse={self.warehouse_path}')
 
     def read_structures_timeseries(self, algo: str, compute_id: str,
-                                   symbol: str, interval: str) -> Tuple[List[int], Dict[int, List[FibGroup]]]:
-        """读取时间序列 result.parquet，返回 (sorted_ts_list, {effective_ts: [FibGroup...]})。"""
+                                   symbol: str, interval: str):
+        """读取时间序列 result.parquet，返回 (groups_list, invalids_dict)。
+        groups_list: [(effective_ts, FibGroup), ...] 按 effective_ts 排序
+        invalids: {(effective_ts, mult, direction): invalidated_ts}
+        """
         path = os.path.join(self.warehouse_path, "computation", algo,
                             compute_id, symbol, interval, "result.parquet")
         if not os.path.isfile(path):
             log.warning(f'[分析] 结构文件不存在: {path}')
-            return [], {}
+            return [], {}, {}
         with duckdb.connect() as conn:
             rows = conn.execute(
                 f"SELECT effective_ts, multiplier, direction, score, leg_start_ts, leg_end_ts, "
-                f"leg_low, leg_high, levels_json FROM read_parquet('{path}') "
-                f"ORDER BY effective_ts, multiplier, score DESC"
+                f"leg_low, leg_high, levels_json, invalidated_ts, invalidate_reason "
+                f"FROM read_parquet('{path}') ORDER BY effective_ts, multiplier, score DESC"
             ).fetchall()
         ts_groups: Dict[int, List[FibGroup]] = {}
+        invalids: Dict[Tuple[int, int, str], int] = {}
         for row in rows:
-            eff_ts, mult, direction, score, start_ts, end_ts, low, high, levels_json = row
+            eff_ts, mult, direction, score, start_ts, end_ts, low, high, levels_json, inv_ts, inv_reason = row
             eff_ts = int(eff_ts)
             leg = TrendLeg(start_idx=0, end_idx=0, start_ts=int(start_ts),
                            end_ts=int(end_ts), low=float(low), high=float(high),
@@ -53,22 +57,37 @@ class AnalysisProtocol(Protocol):
             g = FibGroup(leg=leg, levels=levels, score=float(score),
                          direction=direction, multiplier=int(mult))
             ts_groups.setdefault(eff_ts, []).append(g)
+            if inv_ts is not None:
+                invalids[(eff_ts, int(mult), direction)] = int(inv_ts)
         sorted_ts = sorted(ts_groups.keys())
-        log.info(f'[分析] 读取结构时间序列: {len(sorted_ts)} 个时间点, {len(rows)} 条记录')
-        return sorted_ts, ts_groups
+        log.info(f'[分析] 读取结构时间序列: {len(sorted_ts)} 个时间点, {len(rows)} 条记录, {len(invalids)} 已失效')
+        return sorted_ts, ts_groups, invalids
 
     def get_groups_at(self, sorted_ts: List[int], ts_groups: Dict[int, List[FibGroup]],
-                      bar_ts: int) -> List[FibGroup]:
-        """根据 bar 时间戳找到对应的 fib groups（effective_ts <= bar_ts 的最新一组）。"""
-        idx = bisect_right(sorted_ts, bar_ts) - 1
-        if idx < 0:
-            return []
-        return ts_groups[sorted_ts[idx]]
+                      invalids: Dict, bar_ts: int) -> List[FibGroup]:
+        """返回在 bar_ts 时刻仍然有效的 fib groups。"""
+        result = []
+        for ets in sorted_ts:
+            if ets > bar_ts:
+                break
+            for g in ts_groups[ets]:
+                inv_key = (ets, g.multiplier, g.direction)
+                inv_ts = invalids.get(inv_key)
+                if inv_ts is not None and inv_ts <= bar_ts:
+                    continue
+                result.append(g)
+        # 每 (mult, direction) 只保留最新一组
+        best = {}
+        for g in result:
+            key = (g.multiplier, g.direction)
+            if key not in best or g.score > best[key].score:
+                best[key] = g
+        return list(best.values())
 
     def read_structures(self, algo: str, compute_id: str,
                         symbol: str, interval: str) -> List[FibGroup]:
         """兼容旧接口：返回最新一组 groups。"""
-        sorted_ts, ts_groups = self.read_structures_timeseries(algo, compute_id, symbol, interval)
+        sorted_ts, ts_groups, _ = self.read_structures_timeseries(algo, compute_id, symbol, interval)
         if not sorted_ts:
             return []
         return ts_groups[sorted_ts[-1]]

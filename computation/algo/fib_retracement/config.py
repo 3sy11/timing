@@ -30,6 +30,15 @@ DEFAULTS = {
     "w_volume": 1.0, "w_counter_trend": 0.5, "w_candle": 1.0,
     "strong_threshold": 5.0, "medium_threshold": 3.5, "weak_threshold": 2.0,
     "scan_bars": 0, "min_bars": 200,
+    # 趋势前置 + 腿质量门槛
+    "trend_min_move_pct": 0.10,
+    "min_fit_score": 1.0,
+    # 失效条件
+    "invalidate_break_bars": 2,
+    "invalidate_stale_ratio": 0.2,
+    "invalidate_stale_tol_k": 0.08,
+    "invalidate_score_pct": 0.2,
+    "invalidate_check_interval": 5,
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")

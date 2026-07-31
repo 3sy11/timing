@@ -219,6 +219,33 @@ def score_and_rank(legs: List[TrendLeg], top_n: int = 6, total_bars: int = None)
     return result[:top_n]
 
 
+_INNER_RATIOS = [0.236, 0.382, 0.5, 0.618, 0.786]
+
+
+def fib_cluster_alignment_score(leg: TrendLeg, cluster_centers: List[float], tol_pct: float = 0.008) -> float:
+    """评估一条腿的 5 内层 Fib 线与聚类中心的对齐程度。
+    返回 [0, 5] 的分数（每条对齐的内层线贡献 0~1 分，按距离衰减）。
+    """
+    span = leg.high - leg.low
+    if span <= 0 or not cluster_centers:
+        return 0.0
+    # 计算 5 条内层线的价位
+    if leg.direction == "up":
+        inner_prices = [leg.high - span * r for r in _INNER_RATIOS]
+    else:
+        inner_prices = [leg.low + span * r for r in _INNER_RATIOS]
+    score = 0.0
+    for price in inner_prices:
+        best_dist = float('inf')
+        for c in cluster_centers:
+            dist = abs(price - c) / c if c > 0 else float('inf')
+            if dist < best_dist:
+                best_dist = dist
+        if best_dist < tol_pct:
+            score += 1.0 - (best_dist / tol_pct)  # 越近越接近1分
+    return score
+
+
 def adaptive_window_start(feature_df: pd.DataFrame, base_bars: int, min_conf: float = 0.1) -> int:
     n = len(feature_df)
     if n <= base_bars: return 0
@@ -259,6 +286,155 @@ def compute_retracement_levels(leg: TrendLeg, ratios=None) -> List[Tuple[float, 
 def fit_fib_groups(legs: List[TrendLeg], ratios=None) -> List[FibGroup]:
     ratios = ratios or [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
     return [FibGroup(leg=lg, levels=compute_retracement_levels(lg, ratios), score=lg.conf_score, direction=lg.direction) for lg in legs]
+
+
+# ═══════════════════════════════════════════════════
+#  有效性判断纯函数
+# ═══════════════════════════════════════════════════
+
+def is_trending(highs, lows, trend_min_move_pct: float) -> bool:
+    """判断序列是否处于趋势中：高低幅度 > 阈值。"""
+    if len(highs) < 2:
+        return False
+    h, l = max(highs), min(lows)
+    return (h - l) / l > trend_min_move_pct if l > 0 else False
+
+
+def is_touching(close: float, levels_json: str, leg_range: float, tol_k: float) -> bool:
+    """轻量判断: close 是否触碰该组任一有效线（0.236~0.786）。"""
+    import json as _json
+    tol = leg_range * tol_k
+    for ratio, price in _json.loads(levels_json):
+        if ratio <= 0.0 or ratio >= 1.0:
+            continue
+        if abs(close - price) <= tol:
+            return True
+    return False
+
+
+def check_invalidation(close: float, bar_idx: int, state: dict,
+                       stale_threshold: int, break_bars: int) -> str | None:
+    """检查单组 fib 失效条件。返回原因或 None。
+    state 必须含: record(dict), last_touch_bar(int), break_count(int)
+    """
+    rec = state["record"]
+    leg_high, leg_low = rec["leg_high"], rec["leg_low"]
+    if close > leg_high or close < leg_low:
+        state["break_count"] += 1
+        if state["break_count"] >= break_bars:
+            return "boundary_break"
+    else:
+        state["break_count"] = 0
+    if bar_idx - state["last_touch_bar"] >= stale_threshold:
+        return "stale"
+    return None
+
+
+# ═══════════════════════════════════════════════════
+#  自下而上: 聚类拟合 Fib 网格
+# ═══════════════════════════════════════════════════
+
+_ACTIVE_RATIOS = [0.236, 0.382, 0.5, 0.618, 0.786]
+_ALL_RATIOS = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+
+
+def _solve_hl(p1: float, r1: float, p2: float, r2: float, direction: str):
+    """从 2 个 (price, ratio) 解出 (high, low)。"""
+    denom = r2 - r1
+    if abs(denom) < 1e-10:
+        return 0.0, 0.0
+    if direction == "up":
+        span = (p1 - p2) / denom
+        high = p1 + span * r1
+        low = high - span
+    else:
+        span = (p2 - p1) / denom
+        low = p1 - span * r1
+        high = low + span
+    return high, low
+
+
+def _score_fit(prices, confs, high, low, direction, tol_pct=0.02):
+    """评估聚类对 (high,low) 网格对齐度，返回 (score, assigned_count)。
+    加入 ratio 覆盖率惩罚：5条内层线都应有对应聚类。
+    """
+    span = high - low
+    if span <= 0:
+        return 0.0, 0
+    assigned, score = 0, 0.0
+    covered_ratios = set()
+    for p, c in zip(prices, confs):
+        implied_r = (high - p) / span if direction == "up" else (p - low) / span
+        best_ar, best_dist = None, float('inf')
+        for ar in _ACTIVE_RATIOS:
+            d = abs(implied_r - ar)
+            if d < best_dist:
+                best_dist, best_ar = d, ar
+        if best_dist <= tol_pct:
+            assigned += 1
+            score += c * (1.0 - best_dist / tol_pct)
+            covered_ratios.add(best_ar)
+    # 覆盖率惩罚: 5线中覆盖比例越高分越高
+    coverage = len(covered_ratios) / len(_ACTIVE_RATIOS)
+    score *= coverage
+    return score, assigned
+
+
+def fit_fib_grid_to_clusters(cluster_centers: List[Tuple[float, float]],
+                             direction: str, min_span_pct: float = 0.03,
+                             min_assigned: int = 3) -> List[dict]:
+    """从聚类中心搜索最佳 Fib 网格拟合。
+    Args:
+        cluster_centers: [(price, total_conf), ...] 按 price 排序
+        direction: "up" 或 "down"
+        min_span_pct: leg 最小幅度占比
+        min_assigned: 最少对齐聚类数
+    Returns:
+        [{high, low, score, assigned}, ...] 按 score 降序, 最多 2 条
+    """
+    n = len(cluster_centers)
+    if n < 3:
+        return []
+    prices = [c[0] for c in cluster_centers]
+    confs = [c[1] for c in cluster_centers]
+    price_min, price_max = min(prices), max(prices)
+    price_range = price_max - price_min if price_max > price_min else 1.0
+    seen, results = set(), []
+    for i in range(n):
+        for j in range(i + 1, n):
+            for ri in range(4):
+                for rj in range(ri + 1, 5):
+                    # up方向: 高价对应低ratio, 低价对应高ratio
+                    if direction == "up":
+                        h, l = _solve_hl(prices[j], _ACTIVE_RATIOS[ri],
+                                         prices[i], _ACTIVE_RATIOS[rj], direction)
+                    else:
+                        h, l = _solve_hl(prices[i], _ACTIVE_RATIOS[ri],
+                                         prices[j], _ACTIVE_RATIOS[rj], direction)
+                    if h <= l or l <= 0:
+                        continue
+                    if (h - l) / l < min_span_pct:
+                        continue
+                    # 约束: 0%/100%外推不超过聚类价格范围的1.5倍
+                    if h > price_max + price_range * 1.5 or l < price_min - price_range * 1.5:
+                        continue
+                    key = (round(h, 2), round(l, 2))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    score, assigned = _score_fit(prices, confs, h, l, direction)
+                    if assigned >= min_assigned:
+                        results.append({"high": h, "low": l, "score": score, "assigned": assigned})
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:2]
+
+
+def levels_from_hl(high: float, low: float, direction: str) -> List[Tuple[float, float]]:
+    """从 high/low 生成 7 条 Fib level。"""
+    span = high - low
+    if direction == "up":
+        return [(r, high - span * r) for r in _ALL_RATIOS]
+    return [(r, low + span * r) for r in _ALL_RATIOS]
 
 
 # ═══════════════════════════════════════════════════

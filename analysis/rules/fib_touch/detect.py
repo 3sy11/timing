@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 
 def find_hits(price: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List[dict]:
-    """对每个 group 用动态容差判定命中，过滤窄 leg，返回 hit 列表。"""
+    """对每个 group 用动态容差判定命中（仅有效区 0.236~0.786），过滤窄 leg。"""
     tolerance_k = cfg.tolerance_k
     min_leg_pct = cfg.min_leg_range_pct
     hits = []
@@ -26,6 +26,8 @@ def find_hits(price: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List
             continue
         dynamic_tol = leg_range * tolerance_k
         for ratio, lp in g.levels:
+            if ratio <= 0.0 or ratio >= 1.0:
+                continue
             dist = abs(price - lp)
             if dist > dynamic_tol:
                 continue
@@ -35,6 +37,32 @@ def find_hits(price: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List
                          "level_price": lp, "distance": dist, "proximity": proximity,
                          "group_score": g.score, "leg_range": leg_range})
     return hits
+
+
+def find_warnings(price: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List[dict]:
+    """检测价格触碰 0%/100% 警戒线，不参与决策。"""
+    tolerance_k = cfg.tolerance_k
+    min_leg_pct = cfg.min_leg_range_pct
+    warns = []
+    for gi, g in enumerate(groups):
+        leg_range = g.leg.high - g.leg.low
+        if leg_range <= 0:
+            continue
+        if price > 0 and leg_range / price < min_leg_pct:
+            continue
+        dynamic_tol = leg_range * tolerance_k
+        for ratio, lp in g.levels:
+            if 0.0 < ratio < 1.0:
+                continue
+            dist = abs(price - lp)
+            if dist > dynamic_tol:
+                continue
+            proximity = round(1.0 - dist / dynamic_tol, 4)
+            warns.append({"group_idx": gi, "multiplier": g.multiplier,
+                          "direction": g.direction, "ratio": ratio,
+                          "level_price": lp, "distance": dist, "proximity": proximity,
+                          "group_score": g.score, "leg_range": leg_range})
+    return warns
 
 
 def find_breakouts(close: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List[dict]:
@@ -148,6 +176,23 @@ def detect_bar_signals(close: float, bar: dict, closes: List[float],
             "approach": b["break_side"],
         })
 
+    # ── 警戒信号: 碰 0%/100% 线 ──
+    warns = find_warnings(close, groups, cfg)
+    for w in warns:
+        key = ("warn", w["group_idx"], w["ratio"])
+        if bar_idx - touch_history.get(key, -999) < cfg.cooldown_bars:
+            continue
+        touch_history[key] = bar_idx
+        signals.append({
+            "type": "warning", "bar_idx": bar_idx, "ts": bar_ts, "close": close,
+            "level_price": w["level_price"], "ratio": w["ratio"],
+            "multiplier": w["multiplier"], "group_idx": w["group_idx"], "direction": w["direction"],
+            "proximity": w["proximity"], "distance": round(w["distance"], 4),
+            "leg_range": round(w["leg_range"], 2), "group_score": round(w["group_score"], 4),
+            "bounce_rate": 0.0, "touch_count": 0,
+            "high_volume": False, "volume_ratio": 1.0, "approach": "warning",
+        })
+
     signals.sort(key=lambda x: x["proximity"], reverse=True)
     return signals
 
@@ -178,13 +223,14 @@ def run_detection(klines: List[dict], groups: List[FibGroup],
         all_signals.extend(sigs)
     touches = [s for s in all_signals if s["type"] == "touch"]
     breakouts = [s for s in all_signals if s["type"] == "breakout"]
+    warnings = [s for s in all_signals if s["type"] == "warning"]
     high_prox = sum(1 for s in touches if s["proximity"] >= 0.9)
     med_prox = sum(1 for s in touches if 0.7 <= s["proximity"] < 0.9)
     return {"signals": all_signals,
             "summary": {"total_signals": len(all_signals), "touches": len(touches),
-                        "breakouts": len(breakouts), "high_proximity": high_prox,
-                        "medium_proximity": med_prox}}
+                        "breakouts": len(breakouts), "warnings": len(warnings),
+                        "high_proximity": high_prox, "medium_proximity": med_prox}}
 
 
 def _empty_summary():
-    return {"total_signals": 0, "touches": 0, "breakouts": 0, "high_proximity": 0, "medium_proximity": 0}
+    return {"total_signals": 0, "touches": 0, "breakouts": 0, "warnings": 0, "high_proximity": 0, "medium_proximity": 0}

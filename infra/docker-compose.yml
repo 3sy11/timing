@@ -1,14 +1,18 @@
 services:
   grafana:
     image: grafana/grafana:13.1.0-ubuntu
+    user: "0:0"
     ports:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=timing
       - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=motherduck-duckdb-datasource
-      - GF_DATABASE_PATH=/warehouse/timing/grafana.db
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/plugins/motherduck-duckdb-datasource:/var/lib/grafana/plugins/motherduck-duckdb-datasource
       - ../warehouse/timing:/warehouse/timing
+      - grafana-data:/var/lib/grafana
     restart: unless-stopped
+
+volumes:
+  grafana-data:
