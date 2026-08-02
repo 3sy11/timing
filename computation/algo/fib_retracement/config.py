@@ -33,12 +33,10 @@ DEFAULTS = {
     # 趋势前置 + 腿质量门槛
     "trend_min_move_pct": 0.10,
     "min_fit_score": 1.0,
-    # 失效条件
-    "invalidate_break_bars": 2,
-    "invalidate_stale_ratio": 0.2,
-    "invalidate_stale_tol_k": 0.08,
-    "invalidate_score_pct": 0.2,
-    "invalidate_check_interval": 5,
+    # 失效条件（方案D：break 即死 + 质量门槛）
+    "invalidate_break_bars": 3,
+    # 空置槽位重试间隔（每 N bar 尝试重算一次）
+    "vacancy_retry_interval": 5,
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")

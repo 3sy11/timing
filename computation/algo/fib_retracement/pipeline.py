@@ -1,6 +1,6 @@
-"""fib_retracement pipeline — 固定周期全量计算 + 自然扩展 Fib。
+"""fib_retracement pipeline — 6 组独立生命周期管理。
 核心逻辑: 窗口内聚类 → fit_fib_grid_to_clusters → 内层5线对齐聚类 → 0%/100%数学扩展。
-每个 scan_bars 周期点计算 3×2 组，在周期内逐 bar 检测提前失效。
+每组 (mult, dir) 独立追踪：boundary_break(3 bar) 无条件杀死 → 重算过 min_fit_score 则上线，否则空置。
 """
 import json, logging
 from dataclasses import asdict
@@ -10,8 +10,7 @@ from .algo import (base_df, tag_pivots, tag_zigzag, tag_regression, compute_conf
                    cluster_prices, extract_trend_legs, score_and_rank,
                    adaptive_window_start, merge_legs_weighted, fit_fib_groups,
                    fit_fib_grid_to_clusters, levels_from_hl,
-                   is_trending, is_touching, check_invalidation,
-                   fib_cluster_alignment_score)
+                   is_trending, fib_cluster_alignment_score)
 from .config import RetracementConfig
 from .models import TrendLeg
 from ...writer import StepWriter
@@ -99,9 +98,8 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
     step3_df = pd.concat([clusters_high_df, clusters_low_df], ignore_index=True) if not (clusters_high_df.empty and clusters_low_df.empty) else pd.DataFrame(columns=["kind", "center", "hit_count", "total_conf", "last_index", "last_ts"])
     writer.write_step("step3_clusters", step3_df)
 
-    # ── step4 + result: 固定周期全量计算 + 失效标记 ──
+    # ── step4 + result: 6 组独立生命周期管理 ──
     n = len(feature_df)
-    scan_bars = cfg.scan_bars
     skip_recent = cfg.skip_recent
     start_pos = max(cfg.min_bars, cfg.recent_bars * 3)
     end_pos = max(0, n - skip_recent)
@@ -115,46 +113,74 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
     closes = feature_df["close"].tolist()
     ts_list = feature_df["ts"].tolist()
     break_bars = cfg.invalidate_break_bars
-    stale_ratio = cfg.invalidate_stale_ratio
-    stale_tol_k = cfg.invalidate_stale_tol_k
+    vacancy_interval = cfg.get("vacancy_retry_interval", 5)
 
-    # 固定周期计算点（同旧版逻辑）
-    scan_points = list(range(start_pos, end_pos + 1, scan_bars)) if scan_bars > 0 else [end_pos]
-    if scan_bars > 0 and end_pos not in scan_points:
-        scan_points.append(end_pos)
-    log.info(f'[fib_retracement] 固定周期: scan_bars={scan_bars} 共 {len(scan_points)} 个计算点')
+    ALL_KEYS = [(m, d) for m in (1, 2, 3) for d in ("up", "down")]
+
+    # 初始化 6 组
+    active: dict[tuple, dict | None] = {}
+    break_counts: dict[tuple, int] = {}
+    vacancy_counters: dict[tuple, int] = {}
+
+    for key in ALL_KEYS:
+        recs = _compute_fib_at(feature_df, start_pos, cfg, target_keys={key})
+        if recs and recs[0]["score"] >= cfg.min_fit_score:
+            recs[0]["source"] = "initial"
+            recs[0]["parent_eff_ts"] = None
+            active[key] = recs[0]
+        else:
+            active[key] = None
+        break_counts[key] = 0
+        vacancy_counters[key] = 0
 
     all_records = []
     invalidation_count = 0
 
-    # 每个周期点全量计算 3×2 组
-    for sp_idx, sp in enumerate(scan_points):
-        recs = _compute_fib_at(feature_df, sp, cfg,
-                               clusters_high_df=clusters_high_df, clusters_low_df=clusters_low_df)
-        # 确定该组的有效期终点：下一个周期点的 ts，或永久有效（最后一个点）
-        next_sp = scan_points[sp_idx + 1] if sp_idx + 1 < len(scan_points) else None
-        next_ts = int(ts_list[next_sp]) if next_sp else None
+    log.info(f'[fib_retracement] 独立生命周期: start_pos={start_pos} end_pos={end_pos} break_bars={break_bars}')
 
-        for rec in recs:
-            # 在有效期内逐 bar 检测提前失效
-            inv_ts, inv_reason = None, None
-            if next_sp:
-                state = {"record": rec, "last_touch_bar": sp, "break_count": 0}
-                leg_range = rec["leg_high"] - rec["leg_low"]
-                mult = rec["multiplier"]
-                stale_n = int(cfg.recent_bars * mult * stale_ratio)
-                for bi in range(sp + 1, next_sp + 1):
-                    c = closes[bi]
-                    if is_touching(c, rec["levels_json"], leg_range, stale_tol_k):
-                        state["last_touch_bar"] = bi
-                    reason = check_invalidation(c, bi, state, stale_n, break_bars)
-                    if reason:
-                        inv_ts = int(ts_list[bi])
-                        inv_reason = reason
+    # 逐 bar 推进
+    for bi in range(start_pos + 1, end_pos + 1):
+        close = closes[bi]
+        for key in ALL_KEYS:
+            rec = active[key]
+            if rec is not None:
+                # 活跃组：检测 boundary_break
+                if close > rec["leg_high"] or close < rec["leg_low"]:
+                    break_counts[key] += 1
+                    if break_counts[key] >= break_bars:
+                        # 老组死亡
+                        rec["invalidated_ts"] = int(ts_list[bi])
+                        rec["invalidate_reason"] = "boundary_break"
+                        all_records.append(rec)
                         invalidation_count += 1
-                        break
-            rec["invalidated_ts"] = inv_ts
-            rec["invalidate_reason"] = inv_reason
+                        # 重算
+                        new_recs = _compute_fib_at(feature_df, bi, cfg, target_keys={key})
+                        if new_recs and new_recs[0]["score"] >= cfg.min_fit_score:
+                            new_recs[0]["source"] = "event_break"
+                            new_recs[0]["parent_eff_ts"] = rec["effective_ts"]
+                            active[key] = new_recs[0]
+                        else:
+                            active[key] = None
+                            vacancy_counters[key] = 0
+                        break_counts[key] = 0
+                else:
+                    break_counts[key] = 0
+            else:
+                # 空置槽位：按间隔重试
+                vacancy_counters[key] += 1
+                if vacancy_counters[key] >= vacancy_interval:
+                    vacancy_counters[key] = 0
+                    new_recs = _compute_fib_at(feature_df, bi, cfg, target_keys={key})
+                    if new_recs and new_recs[0]["score"] >= cfg.min_fit_score:
+                        new_recs[0]["source"] = "vacancy_fill"
+                        new_recs[0]["parent_eff_ts"] = None
+                        active[key] = new_recs[0]
+                        break_counts[key] = 0
+
+    # 将仍活跃的组写入（未失效）
+    for key in ALL_KEYS:
+        rec = active[key]
+        if rec is not None:
             all_records.append(rec)
 
     # 写入 step4_legs（兼容）
@@ -176,7 +202,8 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
 
     # 写入 result
     cols = ["effective_ts", "multiplier", "direction", "score", "leg_start_ts", "leg_end_ts",
-            "leg_low", "leg_high", "levels_json", "invalidated_ts", "invalidate_reason"]
+            "leg_low", "leg_high", "levels_json", "invalidated_ts", "invalidate_reason",
+            "source", "parent_eff_ts"]
     result_df = pd.DataFrame(all_records, columns=cols) if all_records else pd.DataFrame(columns=cols)
     writer.write_result(result_df)
 
