@@ -19,4 +19,4 @@ scripts/
 cache/
 temp/
 tmp/
-infra/
+infra/grafana/plugins/*

@@ -7,12 +7,10 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=timing
       - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=motherduck-duckdb-datasource
+      - GF_DATABASE_PATH=/etc/grafana/grafana.db
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/plugins/motherduck-duckdb-datasource:/var/lib/grafana/plugins/motherduck-duckdb-datasource
       - ../warehouse/timing:/warehouse/timing
-      - grafana-data:/var/lib/grafana
+      - ./grafana.db:/etc/grafana/grafana.db
     restart: unless-stopped
-
-volumes:
-  grafana-data:
