@@ -1,0 +1,13 @@
+# wide — 宽感知半径，更多信号，proximity加权更高
+proximity_k = 0.20
+min_leg_range_pct = 0.01
+cooldown_bars = 2
+history_lookback_bars = 150
+volume_lookback = 20
+volume_cap = 3.0
+scan_bars = 0
+w_proximity = 2.5
+w_bounce = 1.0
+w_volume = 0.5
+w_consensus = 1.5
+w_ratio = 0.5

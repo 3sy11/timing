@@ -1,8 +1,10 @@
-"""fib_touch 检测纯函数：动态容差 + 结构化特征输出 + 突破信号。
+"""fib_touch v2 — 纯定量proximity测量 + 因子计算 + 衍生score。
 
-方案E: tolerance = leg_range × tolerance_k，proximity = 1 - distance/tolerance。
-过滤: leg_range / close < min_leg_range_pct 的窄 group 不参与检测。
-突破: close 突破 leg 边界时产出 type=breakout 信号。
+核心变化：
+- 全部7线参与（含0%/100%），不再分type分类
+- proximity为连续值[0,1]，不做阈值过滤
+- 输出原始因子 + 一个衍生加权score字段(score_derived)
+- Analysis只做测量，所有定性判断留给Decision层
 """
 import logging
 from typing import Dict, List, Tuple
@@ -12,84 +14,62 @@ from .config import FibTouchConfig
 
 log = logging.getLogger(__name__)
 
+# ratio重要性权重：0.618/0.5最关键，0%/100%最低
+_RATIO_IMPORTANCE = {0.0: 0.3, 0.236: 0.5, 0.382: 0.7, 0.5: 0.9, 0.618: 1.0, 0.786: 0.7, 1.0: 0.3}
 
-def find_hits(price: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List[dict]:
-    """对每个 group 用动态容差判定命中（仅有效区 0.236~0.786），过滤窄 leg。"""
-    tolerance_k = cfg.tolerance_k
+
+def _ratio_importance(ratio: float) -> float:
+    best_dist, best_w = 1.0, 0.5
+    for r, w in _RATIO_IMPORTANCE.items():
+        if abs(ratio - r) < best_dist:
+            best_dist, best_w = abs(ratio - r), w
+    return best_w
+
+
+def measure_proximity(close: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List[dict]:
+    """对所有7线测量proximity，返回感知半径内的记录。纯测量，无过滤逻辑。"""
+    proximity_k = cfg.proximity_k
     min_leg_pct = cfg.min_leg_range_pct
-    hits = []
+    records = []
     for gi, g in enumerate(groups):
-        leg_range = g.leg.high - g.leg.low
-        if leg_range <= 0:
-            continue
-        if price > 0 and leg_range / price < min_leg_pct:
-            continue
-        dynamic_tol = leg_range * tolerance_k
-        for ratio, lp in g.levels:
-            if ratio <= 0.0 or ratio >= 1.0:
-                continue
-            dist = abs(price - lp)
-            if dist > dynamic_tol:
-                continue
-            proximity = round(1.0 - dist / dynamic_tol, 4)
-            hits.append({"group_idx": gi, "multiplier": g.multiplier,
-                         "direction": g.direction, "ratio": ratio,
-                         "level_price": lp, "distance": dist, "proximity": proximity,
-                         "group_score": g.score, "leg_range": leg_range})
-    return hits
-
-
-def find_warnings(price: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List[dict]:
-    """检测价格触碰 0%/100% 警戒线，不参与决策。"""
-    tolerance_k = cfg.tolerance_k
-    min_leg_pct = cfg.min_leg_range_pct
-    warns = []
-    for gi, g in enumerate(groups):
-        leg_range = g.leg.high - g.leg.low
-        if leg_range <= 0:
-            continue
-        if price > 0 and leg_range / price < min_leg_pct:
-            continue
-        dynamic_tol = leg_range * tolerance_k
-        for ratio, lp in g.levels:
-            if 0.0 < ratio < 1.0:
-                continue
-            dist = abs(price - lp)
-            if dist > dynamic_tol:
-                continue
-            proximity = round(1.0 - dist / dynamic_tol, 4)
-            warns.append({"group_idx": gi, "multiplier": g.multiplier,
-                          "direction": g.direction, "ratio": ratio,
-                          "level_price": lp, "distance": dist, "proximity": proximity,
-                          "group_score": g.score, "leg_range": leg_range})
-    return warns
-
-
-def find_breakouts(close: float, groups: List[FibGroup], cfg: FibTouchConfig) -> List[dict]:
-    """检测价格突破 leg 边界的事件，过滤窄 leg。"""
-    btk = cfg.breakout_tolerance_k
-    min_leg_pct = cfg.min_leg_range_pct
-    broken = []
-    for i, g in enumerate(groups):
         leg_range = g.leg.high - g.leg.low
         if leg_range <= 0:
             continue
         if close > 0 and leg_range / close < min_leg_pct:
             continue
-        tol = leg_range * btk
-        if close > g.leg.high + tol:
-            broken.append({"group_idx": i, "multiplier": g.multiplier, "direction": g.direction,
-                           "break_side": "above_high", "level_price": g.leg.high,
-                           "leg_range": leg_range, "group_score": g.score})
-        elif close < g.leg.low - tol:
-            broken.append({"group_idx": i, "multiplier": g.multiplier, "direction": g.direction,
-                           "break_side": "below_low", "level_price": g.leg.low,
-                           "leg_range": leg_range, "group_score": g.score})
-    return broken
+        max_dist = leg_range * proximity_k
+        for ratio, lp in g.levels:
+            dist = abs(close - lp)
+            if dist > max_dist:
+                continue
+            prox = round(1.0 - dist / max_dist, 4)
+            records.append({"group_idx": gi, "multiplier": g.multiplier, "direction": g.direction,
+                           "ratio": ratio, "level_price": lp, "distance": round(dist, 4), "proximity": prox})
+    return records
 
 
-def evaluate_level_history(df: pd.DataFrame, level_price: float, dynamic_tol: float,
-                           bar_idx: int, lookback_bars: int) -> dict:
+def compute_consensus(records: List[dict], tolerance: float) -> Dict[int, int]:
+    """统计每条记录的level_price附近有多少组独立fib线共振。返回 {record_idx: consensus_count}。"""
+    n = len(records)
+    result = {}
+    for i in range(n):
+        lp = records[i]["level_price"]
+        seen_keys = {(records[i]["multiplier"], records[i]["direction"])}
+        count = 1
+        for j in range(n):
+            if i == j:
+                continue
+            key = (records[j]["multiplier"], records[j]["direction"])
+            if key in seen_keys:
+                continue
+            if abs(records[j]["level_price"] - lp) <= tolerance:
+                seen_keys.add(key)
+                count += 1
+        result[i] = count
+    return result
+
+
+def evaluate_level_history(df: pd.DataFrame, level_price: float, dynamic_tol: float, bar_idx: int, lookback_bars: int) -> dict:
     start = max(0, bar_idx - lookback_bars)
     lo_loc, hi_loc, cl_loc = df.columns.get_loc("low"), df.columns.get_loc("high"), df.columns.get_loc("close")
     touches, bounces = 0, 0
@@ -102,135 +82,115 @@ def evaluate_level_history(df: pd.DataFrame, level_price: float, dynamic_tol: fl
         cc, nc = df.iat[i, cl_loc], df.iat[i + 1, cl_loc]
         if (cc < level_price and nc > cc) or (cc > level_price and nc < cc):
             bounces += 1
-    return {"touch_count": touches, "bounce_rate": bounces / touches if touches > 0 else 0.0}
+    return {"touch_count": touches, "bounce_rate": round(bounces / touches, 4) if touches > 0 else 0.0}
 
 
-def volume_confirmation(df: pd.DataFrame, bar_idx: int, cfg: FibTouchConfig) -> dict:
-    lookback = cfg.volume_lookback
+def compute_volume_ratio(df: pd.DataFrame, bar_idx: int, lookback: int) -> float:
     if bar_idx < lookback or "volume" not in df.columns:
-        return {"volume_ratio": 1.0, "high_volume": False}
+        return 1.0
     vol_loc = df.columns.get_loc("volume")
     total = sum(df.iat[j, vol_loc] for j in range(bar_idx - lookback, bar_idx))
     avg = total / lookback
     cur = df.iat[bar_idx, vol_loc]
-    ratio = cur / avg if avg > 0 else 1.0
-    return {"volume_ratio": round(ratio, 2), "high_volume": ratio > cfg.volume_threshold}
+    return round(cur / avg, 4) if avg > 0 else 1.0
 
 
-def detect_bar_signals(close: float, bar: dict, closes: List[float],
-                       df: pd.DataFrame, groups: List[FibGroup], bar_idx: int,
-                       touch_history: Dict[Tuple, int], cfg: FibTouchConfig) -> List[dict]:
-    """对单根 bar 检测触碰 + 突破，统一产出信号。"""
+def compute_approach(closes: List[float], level_price: float) -> str:
+    if len(closes) < 2:
+        return "unknown"
+    prev, cur = closes[-2], closes[-1]
+    if prev > level_price > cur:
+        return "from_above"
+    elif prev < level_price < cur:
+        return "from_below"
+    return "at_level"
+
+
+def compute_score_derived(proximity: float, bounce_rate: float, volume_ratio: float, consensus: int, ratio: float, cfg: FibTouchConfig) -> float:
+    """衍生加权得分。权重可配，结果为连续值。"""
+    vol_cap = cfg.volume_cap
+    score = (proximity * cfg.w_proximity
+           + bounce_rate * cfg.w_bounce
+           + min(volume_ratio, vol_cap) / vol_cap * cfg.w_volume
+           + consensus * cfg.w_consensus
+           + _ratio_importance(ratio) * cfg.w_ratio)
+    return round(score, 4)
+
+
+def detect_bar_signals(close: float, closes: List[float], df: pd.DataFrame, groups: List[FibGroup], bar_idx: int, cooldown_state: Dict[Tuple, int], cfg: FibTouchConfig) -> List[dict]:
+    """对单根bar测量所有fib线的proximity并计算因子，产出定量信号。"""
     ts_loc = df.columns.get_loc("ts")
     bar_ts = int(df.iat[bar_idx, ts_loc])
+    # 测量proximity
+    prox_records = measure_proximity(close, groups, cfg)
+    if not prox_records:
+        return []
+    # cooldown过滤（同一线短期内不重复产出）
+    filtered = []
+    for rec in prox_records:
+        key = (rec["group_idx"], rec["ratio"])
+        if bar_idx - cooldown_state.get(key, -999) < cfg.cooldown_bars:
+            continue
+        cooldown_state[key] = bar_idx
+        filtered.append(rec)
+    if not filtered:
+        return []
+    # consensus（该bar上多少组共振）
+    avg_leg_range = sum(r.get("distance", 0) for r in filtered) / len(filtered) if filtered else 50.0
+    consensus_tol = max(30.0, avg_leg_range * 2)
+    consensus_map = compute_consensus(filtered, consensus_tol)
+    # volume
+    vol_ratio = compute_volume_ratio(df, bar_idx, cfg.volume_lookback)
+    # approach
+    approach = compute_approach(closes, filtered[0]["level_price"]) if filtered else "unknown"
+    # 组装信号
     signals = []
-
-    # ── 触碰信号 ──
-    hits = find_hits(close, groups, cfg)
-    if hits:
-        vol = volume_confirmation(df, bar_idx, cfg)
-        approach = "unknown"
-        if len(closes) >= 2:
-            prev = closes[-2]
-            best_lp = hits[0]["level_price"]
-            if prev > best_lp > close:
-                approach = "from_above"
-            elif prev < best_lp < close:
-                approach = "from_below"
-            else:
-                approach = "at_level"
-        for hit in hits:
-            gi, ratio = hit["group_idx"], hit["ratio"]
-            key = (gi, ratio)
-            if bar_idx - touch_history.get(key, -999) < cfg.cooldown_bars:
-                continue
-            history = evaluate_level_history(df, hit["level_price"], hit["leg_range"] * cfg.tolerance_k,
-                                             bar_idx, cfg.history_lookback_bars)
-            touch_history[key] = bar_idx
-            signals.append({
-                "type": "touch", "bar_idx": bar_idx, "ts": bar_ts, "close": close,
-                "level_price": hit["level_price"], "ratio": hit["ratio"],
-                "multiplier": hit["multiplier"], "group_idx": gi, "direction": hit["direction"],
-                "proximity": hit["proximity"], "distance": round(hit["distance"], 4),
-                "leg_range": round(hit["leg_range"], 2), "group_score": round(hit["group_score"], 4),
-                "bounce_rate": round(history["bounce_rate"], 4), "touch_count": history["touch_count"],
-                "high_volume": vol["high_volume"], "volume_ratio": vol["volume_ratio"],
-                "approach": approach,
-            })
-
-    # ── 突破信号: level_price 用 close 以便 Grafana 打点在 kline 上 ──
-    breakouts = find_breakouts(close, groups, cfg)
-    for b in breakouts:
-        key = ("brk", b["group_idx"], b["break_side"])
-        if bar_idx - touch_history.get(key, -999) < cfg.cooldown_bars:
-            continue
-        touch_history[key] = bar_idx
+    for idx, rec in enumerate(filtered):
+        # bounce_rate / touch_count
+        leg_range = 0.0
+        for g in groups:
+            if g.multiplier == rec["multiplier"] and g.direction == rec["direction"]:
+                leg_range = g.leg.high - g.leg.low
+                break
+        history_tol = leg_range * cfg.proximity_k * 0.5
+        history = evaluate_level_history(df, rec["level_price"], history_tol, bar_idx, cfg.history_lookback_bars)
+        consensus = consensus_map.get(idx, 1)
+        score = compute_score_derived(rec["proximity"], history["bounce_rate"], vol_ratio, consensus, rec["ratio"], cfg)
         signals.append({
-            "type": "breakout", "bar_idx": bar_idx, "ts": bar_ts, "close": close,
-            "level_price": close, "ratio": 0.0 if b["break_side"] == "above_high" else 1.0,
-            "multiplier": b["multiplier"], "group_idx": b["group_idx"], "direction": b["direction"],
-            "proximity": 1.0, "distance": abs(close - b["level_price"]),
-            "leg_range": round(b["leg_range"], 2), "group_score": round(b["group_score"], 4),
-            "bounce_rate": 0.0, "touch_count": 0,
-            "high_volume": False, "volume_ratio": 1.0,
-            "approach": b["break_side"],
+            "ts": bar_ts, "close": close,
+            "multiplier": rec["multiplier"], "direction": rec["direction"],
+            "ratio": rec["ratio"], "level_price": rec["level_price"],
+            # 原始因子
+            "distance": rec["distance"], "proximity": rec["proximity"],
+            "bounce_rate": history["bounce_rate"], "touch_count": history["touch_count"],
+            "volume_ratio": vol_ratio, "consensus": consensus, "approach": approach,
+            # 衍生字段
+            "score_derived": score,
         })
-
-    # ── 警戒信号: 碰 0%/100% 线 ──
-    warns = find_warnings(close, groups, cfg)
-    for w in warns:
-        key = ("warn", w["group_idx"], w["ratio"])
-        if bar_idx - touch_history.get(key, -999) < cfg.cooldown_bars:
-            continue
-        touch_history[key] = bar_idx
-        signals.append({
-            "type": "warning", "bar_idx": bar_idx, "ts": bar_ts, "close": close,
-            "level_price": w["level_price"], "ratio": w["ratio"],
-            "multiplier": w["multiplier"], "group_idx": w["group_idx"], "direction": w["direction"],
-            "proximity": w["proximity"], "distance": round(w["distance"], 4),
-            "leg_range": round(w["leg_range"], 2), "group_score": round(w["group_score"], 4),
-            "bounce_rate": 0.0, "touch_count": 0,
-            "high_volume": False, "volume_ratio": 1.0, "approach": "warning",
-        })
-
-    signals.sort(key=lambda x: x["proximity"], reverse=True)
     return signals
 
 
-def run_detection(klines: List[dict], groups: List[FibGroup],
-                  cfg: FibTouchConfig = None, groups_resolver=None) -> dict:
-    """批量扫描 K 线，产出信号（含触碰+突破）+ 摘要。"""
+def run_detection(klines: List[dict], groups: List[FibGroup], cfg: FibTouchConfig = None, groups_resolver=None) -> dict:
+    """批量扫描K线，产出定量proximity信号 + 摘要。"""
     cfg = cfg or FibTouchConfig()
     from computation.algo.fib_retracement.algo import base_df
     df = base_df(klines)
     n = len(df)
     if n == 0 or (not groups_resolver and not groups):
-        return {"signals": [], "summary": _empty_summary()}
+        return {"signals": [], "summary": {"total_signals": 0}}
     start = max(0, n - cfg.scan_bars) if cfg.scan_bars > 0 else 0
     closes_list = df["close"].tolist()
     all_signals = []
-    touch_history: Dict[Tuple, int] = {}
-    cols = ("open", "high", "low", "close", "volume", "ts")
-    col_locs = {c: df.columns.get_loc(c) for c in cols}
+    cooldown_state: Dict[Tuple, int] = {}
     for i in range(start, n):
         close_i = closes_list[i]
-        bar_ts = int(df.iat[i, col_locs["ts"]])
+        bar_ts = int(df.iat[i, df.columns.get_loc("ts")])
         cur_groups = groups_resolver(bar_ts) if groups_resolver else groups
         if not cur_groups:
             continue
-        bar = {c: df.iat[i, col_locs[c]] for c in cols}
-        sigs = detect_bar_signals(close_i, bar, closes_list[:i + 1], df, cur_groups, i, touch_history, cfg)
+        sigs = detect_bar_signals(close_i, closes_list[:i + 1], df, cur_groups, i, cooldown_state, cfg)
         all_signals.extend(sigs)
-    touches = [s for s in all_signals if s["type"] == "touch"]
-    breakouts = [s for s in all_signals if s["type"] == "breakout"]
-    warnings = [s for s in all_signals if s["type"] == "warning"]
-    high_prox = sum(1 for s in touches if s["proximity"] >= 0.9)
-    med_prox = sum(1 for s in touches if 0.7 <= s["proximity"] < 0.9)
+    high_score = sum(1 for s in all_signals if s["score_derived"] >= 3.0)
     return {"signals": all_signals,
-            "summary": {"total_signals": len(all_signals), "touches": len(touches),
-                        "breakouts": len(breakouts), "warnings": len(warnings),
-                        "high_proximity": high_prox, "medium_proximity": med_prox}}
-
-
-def _empty_summary():
-    return {"total_signals": 0, "touches": 0, "breakouts": 0, "warnings": 0, "high_proximity": 0, "medium_proximity": 0}
+            "summary": {"total_signals": len(all_signals), "high_score_count": high_score,
+                        "avg_score": round(sum(s["score_derived"] for s in all_signals) / len(all_signals), 3) if all_signals else 0}}

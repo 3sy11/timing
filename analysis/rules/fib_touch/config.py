@@ -1,6 +1,7 @@
-"""FibTouchConfig — fib_touch Rule 自有配置 schema。
+"""FibTouchConfig v2 — 纯定量proximity测量配置。
 
-仅包含分析层关注的检测参数，不继承 computation 的配置类。
+proximity_k: 感知半径(替代原tolerance_k), max_distance = leg_range × proximity_k
+权重参数: w_proximity, w_bounce, w_volume, w_consensus, w_ratio
 """
 import os
 import tomllib
@@ -9,30 +10,32 @@ import logging
 log = logging.getLogger(__name__)
 
 DEFAULTS = {
-    "tolerance_k": 0.08,
-    "min_leg_range_pct": 0.03,
-    "cooldown_bars": 5,
-    "approach_lookback": 5,
-    "history_lookback_bars": 200,
-    "volume_lookback": 20,
-    "volume_threshold": 1.5,
-    "breakout_tolerance_k": 0.02,
-    "scan_bars": 0,
+    "proximity_k": 0.15,          # 感知半径: max_distance = leg_range × 0.15
+    "min_leg_range_pct": 0.02,    # 窄腿过滤
+    "cooldown_bars": 3,           # 同一线冷却期
+    "history_lookback_bars": 200, # bounce_rate回看窗口
+    "volume_lookback": 20,        # volume均量回看
+    "volume_cap": 3.0,            # volume_ratio归一化上限
+    "scan_bars": 0,               # 0=全量扫描
+    # 衍生score权重
+    "w_proximity": 2.0,
+    "w_bounce": 1.5,
+    "w_volume": 0.5,
+    "w_consensus": 1.0,
+    "w_ratio": 0.5,
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")
 
 
 class FibTouchConfig(dict):
-    """dict 子类，支持属性访问。"""
-
+    """dict子类，支持属性访问。"""
     def __init__(self, **kwargs):
         merged = {**DEFAULTS, **kwargs}
         super().__init__(merged)
 
     @classmethod
     def from_profile(cls, profile_name: str, overrides: list[str] | None = None) -> "FibTouchConfig":
-        """从 profiles/{name}.toml + CLI overrides 构造。"""
         profile_data = _load_profile(profile_name)
         override_data = _parse_overrides(overrides)
         merged = {**DEFAULTS, **profile_data, **override_data}
@@ -44,16 +47,11 @@ class FibTouchConfig(dict):
 
     @property
     def config_source(self) -> dict:
-        return {
-            "profile": getattr(self, "_profile_name", None),
-            "overrides": getattr(self, "_override_data", {}),
-        }
+        return {"profile": getattr(self, "_profile_name", None), "overrides": getattr(self, "_override_data", {})}
 
     def __getattr__(self, key):
-        try:
-            return self[key]
-        except KeyError:
-            raise AttributeError(f"FibTouchConfig has no key '{key}'")
+        try: return self[key]
+        except KeyError: raise AttributeError(f"FibTouchConfig has no key '{key}'")
 
     def __setattr__(self, key, value):
         self[key] = value
@@ -78,8 +76,6 @@ def _parse_overrides(overrides: list[str] | None) -> dict:
         if "=" not in item:
             continue
         key, val_str = item.split("=", 1)
-        try:
-            result[key.strip()] = _json.loads(val_str.strip())
-        except (ValueError, _json.JSONDecodeError):
-            result[key.strip()] = val_str.strip()
+        try: result[key.strip()] = _json.loads(val_str.strip())
+        except (ValueError, _json.JSONDecodeError): result[key.strip()] = val_str.strip()
     return result
