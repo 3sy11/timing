@@ -18,3 +18,12 @@ invalidate_stale_ratio = 0.2
 invalidate_stale_tol_k = 0.08
 invalidate_score_pct = 0.2
 invalidate_check_interval = 5
+# v3 新增参数
+max_price_lines = 8
+min_line_strength = 0.5
+top_lines_for_fit = 8
+max_ratio_error = 0.05
+min_fib_quality = 0.2
+band_decay_factor = 0.7
+band_decay_n = 0.20
+recalc_interval = 20

@@ -1,6 +1,6 @@
-# Fib Retracement 各阶段 输入/输出 字段分析
+# Fib Retracement v3 各阶段 输入/输出 字段分析
 
-> 目的：为升级到 v2（密度带方案）前，彻底梳理现有各阶段数据流转
+> 基于 fib_revision_plan_v3.docx 实施后的当前方案
 
 ---
 
@@ -9,30 +9,36 @@
 ```
 klines (原始OHLCV)
    ↓
-Stage 1: 拐点识别 → step1_pivots.parquet (feature_df)
-   ↓
-Stage 2: 置信度融合 → step2_confidence.parquet
-   ↓
-Stage 3: 价格聚类 → step3_clusters.parquet
-   ↓
-Stage 4: Fib拟合 + 生命周期 → step4_legs.parquet + result.parquet
-   ↓
-衍生: fib.parquet, zone.parquet
+Stage 1: 拐点识别 (保留不变)
+         tag_pivots / tag_zigzag / tag_regression
+   ↓  → feature_df + wmap
+Stage 2: 置信度融合 (保留不变)
+         compute_confidence(feature_df, wmap, weights)
+   ↓  → feature_df（含 conf_high / conf_low）
+Stage 3: 价格线聚合 (v3 重构)
+         aggregate_price_lines(window_df, cfg)
+   ↓  → List[PriceLine]  ×3 multiplier
+   ↓  → step3_price_lines.parquet
+Stage 4: Fib 拟合与解释 (v3 重构)
+         fit_fib_to_price_lines(price_lines, cfg)
+   ↓  → FibResult（含 FibLevel × 7, 每条标注锚点）
+   ↓  → step4_fib_result.parquet
+输出层:
+   ├── result.parquet      (主输出, 每 multiplier 一行)
+   ├── fib.parquet         (前向填充, 逐bar×fib线)
+   └── zone.parquet        (价格线 → 直接作为 zone)
 ```
 
 ---
 
-## Stage 1: 拐点识别
+## Stage 1: 拐点识别（保留不变）
 
 ### 输入
 
 | 字段 | 来源 | 说明 |
 |:--|:--|:--|
 | ts | klines | 毫秒时间戳 |
-| open | klines | 开盘价 |
-| high | klines | 最高价 |
-| low | klines | 最低价 |
-| close | klines | 收盘价 |
+| open/high/low/close | klines | OHLC 价格 |
 | volume | klines | 成交量 |
 
 ### 处理函数
@@ -43,37 +49,35 @@ Stage 4: Fib拟合 + 生命周期 → step4_legs.parquet + result.parquet
 | `tag_zigzag(df, zigzag_thresholds)` | `zigzag_thresholds=[0.05,0.10]` | 幅度反转标记 |
 | `tag_regression(df, regression_windows)` | `regression_windows=[50,100]` | 回归偏离检测 |
 
-### 输出: `step1_pivots.parquet`
+### 输出字段（feature_df 新增列）
 
-| 字段 | 类型 | 含义 | v2处置 |
-|:--|:--|:--|:--|
-| ts | INT64 | bar 时间戳 | 保留 |
-| open/high/low/close/volume | FLOAT64 | OHLCV | 保留 |
-| pivot_high_5x5 | FLOAT64 | 5bar窗口内局部最高点价格，NaN=非极值 | **保留** |
-| pivot_low_5x5 | FLOAT64 | 5bar窗口内局部最低点价格 | **保留** |
-| pivot_high_8x8 | FLOAT64 | 8bar窗口内局部最高点价格 | **保留** |
-| pivot_low_8x8 | FLOAT64 | 8bar窗口内局部最低点价格 | **保留** |
-| zigzag_high_5 | FLOAT64 | 5%反转确认的高点价格 | **保留** |
-| zigzag_low_5 | FLOAT64 | 5%反转确认的低点价格 | **保留** |
-| zigzag_high_10 | FLOAT64 | 10%反转确认的高点价格 | **保留** |
-| zigzag_low_10 | FLOAT64 | 10%反转确认的低点价格 | **保留** |
-| reg_high_50 | FLOAT64 | 50bar回归>2σ偏离的高点 | **保留** |
-| reg_low_50 | FLOAT64 | 50bar回归<-2σ偏离的低点 | **保留** |
-| reg_high_100 | FLOAT64 | 100bar回归偏离高点 | **保留** |
-| reg_low_100 | FLOAT64 | 100bar回归偏离低点 | **保留** |
+| 字段 | 类型 | 含义 |
+|:--|:--|:--|
+| pivot_high_5x5 | FLOAT64 | 5bar窗口内局部最高点价格，NaN=非极值 |
+| pivot_low_5x5 | FLOAT64 | 5bar窗口内局部最低点价格 |
+| pivot_high_8x8 | FLOAT64 | 8bar窗口 |
+| pivot_low_8x8 | FLOAT64 | 8bar窗口 |
+| zigzag_high_5 | FLOAT64 | 5%反转确认的高点 |
+| zigzag_low_5 | FLOAT64 | 5%反转确认的低点 |
+| zigzag_high_10 | FLOAT64 | 10%反转确认 |
+| zigzag_low_10 | FLOAT64 | 10%反转确认 |
+| reg_high_50 | FLOAT64 | 50bar回归>2σ偏离 |
+| reg_low_50 | FLOAT64 | 50bar回归<-2σ |
+| reg_high_100 | FLOAT64 | 100bar回归偏离 |
+| reg_low_100 | FLOAT64 | 100bar回归偏离 |
 
-**下游用途**: wmap（列→方法key映射）传入 Stage 2 计算置信度
+副产物: `wmap = {col_name: method_key}` 映射表
 
 ---
 
-## Stage 2: 置信度融合
+## Stage 2: 置信度融合（保留不变）
 
 ### 输入
 
 | 字段 | 来源 | 说明 |
 |:--|:--|:--|
 | feature_df | Stage 1 输出 | 含所有拐点标注列 |
-| wmap | Stage 1 副产物 | `{col_name: method_key}` 映射 |
+| wmap | Stage 1 副产物 | `{col_name: method_key}` |
 | weights | config | `{method_key: weight}` 如 `pivot_8: 1.0` |
 
 ### 处理函数
@@ -84,237 +88,320 @@ compute_confidence(feature_df, wmap, weights)
 
 逻辑: 对每个 bar，遍历所有拐点列，有值(非NaN)则累加该方法的 weight，最终归一化到 [0, 1]。
 
-### 输出: `step2_confidence.parquet`
+### 输出（feature_df 新增列）
 
-| 字段 | 类型 | 含义 | v2处置 |
-|:--|:--|:--|:--|
-| ts | INT64 | bar 时间戳 | 保留 |
-| high | FLOAT64 | 最高价（作为 high 拐点的价格） | 保留 |
-| low | FLOAT64 | 最低价（作为 low 拐点的价格） | 保留 |
-| close | FLOAT64 | 收盘价 | 保留 |
-| conf_high | FLOAT64 | 该 bar 作为高点的置信度 [0,1] | **保留** |
-| conf_low | FLOAT64 | 该 bar 作为低点的置信度 [0,1] | **保留** |
+| 字段 | 类型 | 含义 |
+|:--|:--|:--|
+| conf_high | FLOAT64 | 该 bar 作为高点的置信度 [0, 1] |
+| conf_low | FLOAT64 | 该 bar 作为低点的置信度 [0, 1] |
 
-**下游用途**:
-- conf_high >= min_conf 的 bar 提取 high 价格 → Stage 3 聚类
-- conf_low >= min_conf 的 bar 提取 low 价格 → Stage 3 聚类
-- v2: conf_high 和 conf_low 合并进入全局密度图
+**下游用途**: conf_high / conf_low 作为 Stage 3 的候选拐点来源
 
 ---
 
-## Stage 3: 价格聚类
+## Stage 3: 价格线聚合（v3 重构）
+
+### 核心理念
+
+- high/low 拐点**全部合并**到一个列表，不区分来源
+- tolerance 用**相对值** = price_range × cluster_tolerance_pct
+- N（输出数量）完全由参数决定，不是固定值
+- 每条价格线是独立有效的支撑/阻力位，不依赖 Fib
 
 ### 输入
 
 | 字段 | 来源 | 说明 |
 |:--|:--|:--|
-| feature_df | Stage 2 输出 | 含 conf_high, conf_low |
-| kind | 调用参数 | `"high"` 或 `"low"` — **分别调用两次** |
-| tolerance_pct | config | 聚类容差，默认 0.005 |
-| min_conf | config | 最低置信度门槛，默认 0.3 |
+| feature_df（窗口切片） | Stage 2 输出 | 含 conf_high, conf_low, high, low, ts |
+| cfg.min_cluster_conf | config | 最低置信度门槛（进入候选的条件） |
+| cfg.cluster_tolerance_pct | config | 聚类容差百分比 |
+| cfg.max_price_lines | config | 输出上限 |
+| cfg.min_line_strength | config | 最低强度门槛 |
+
+### 窗口策略
+
+每个 multiplier 独立调用一次 `aggregate_price_lines`:
+
+| multiplier | 数据窗口 | 典型价格线数 | 特点 |
+|:--|:--|:--|:--|
+| ×1 | recent_bars × 1 | 2-5条 | 近期结构，反应快 |
+| ×2 | recent_bars × 2 | 5-8条 | 主力参考，稳定 |
+| ×3 | recent_bars × 3 | 6-10条 | 长期结构，覆盖广 |
 
 ### 处理函数
 
 ```python
-clusters_high_df = cluster_prices(feature_df, "high", tolerance_pct, min_conf)
-clusters_low_df = cluster_prices(feature_df, "low", tolerance_pct, min_conf)
+aggregate_price_lines(feature_df: pd.DataFrame, cfg) -> List[PriceLine]
 ```
 
-逻辑: 按价格排序后相邻聚类，价格差 ≤ price_range × tolerance_pct 则合并。
+**五步逻辑:**
 
-### 输出: `step3_clusters.parquet`（high + low 合并存储）
+1. **收集候选拐点**: conf_high ≥ min_conf → 取 high 价格; conf_low ≥ min_conf → 取 low 价格
+2. **按价格排序 + 滑动合并**: `tol = price_range × cluster_tolerance_pct`，以加权中心判断距离（避免链式漂移）
+3. **计算指标**: center(加权均值) / hit_count / total_conf / time_span_ratio / has_high/has_low / line_strength
+4. **过滤**: line_strength ≥ min_line_strength
+5. **截取**: Top-N (max_price_lines)
 
-| 字段 | 类型 | 含义 | v2处置 |
-|:--|:--|:--|:--|
-| kind | VARCHAR | `"high"` 或 `"low"`，表示来源类型 | **废弃** → 全局合并不区分 |
-| center | FLOAT64 | 聚类中心价格（置信加权均值） | **保留** → 成为 density_band.center |
-| hit_count | INT64 | 落入该簇的拐点个数 | **保留** → 成为 density_band.hit_count |
-| total_conf | FLOAT64 | 落入该簇所有拐点的置信度之和 | **保留** → 成为 density_band.total_conf |
-| last_index | INT64 | 最后一个拐点的 df 行索引 | **保留** → 用于计算 time_span |
-| last_ts | INT64 | 最后一个拐点的时间戳 | **保留** → 成为 last_touch_ts |
-
-**下游用途**:
-- clusters_high_df.center → 作为 Stage 4 `fit_fib_grid_to_clusters` 的输入
-- clusters_low_df.center → 同上
-- 两者合并为 `centers = [(price, conf), ...]` 传入拟合
-
-### v2 核心改造点
-
+**强度公式:**
 ```
-旧: cluster_prices("high") + cluster_prices("low") → 分别得到两个列表 → 合并传入 Fib 拟合
-新: build_price_density(feature_df) → 一次性全局聚类 → 输出 density_bands
-    - high 和 low 拐点的价格放在一起
-    - 新增字段: has_high, has_low, is_bidirectional, time_span_ratio, band_strength
+line_strength = total_conf × (1 + time_span_ratio) × (1.5 if is_bidirectional else 1.0)
 ```
+
+### 输出: `step3_price_lines.parquet`
+
+| 字段 | 类型 | 含义 |
+|:--|:--|:--|
+| compute_ts | INT64 | 本次计算时间戳 |
+| multiplier | INT64 | 来自哪个倍数窗口 (1/2/3) |
+| center | FLOAT64 | 置信度加权均值，代表价格 |
+| tolerance | FLOAT64 | 有效吸引范围 = price_range × cluster_tolerance_pct |
+| hit_count | INT64 | 落入该线的拐点总数 (high + low 合并) |
+| total_conf | FLOAT64 | 置信度加权和 |
+| time_span_ratio | FLOAT64 | (last_idx - first_idx) / 窗口长度 ∈ [0, 1] |
+| has_high | BOOL | 包含 high 拐点 |
+| has_low | BOOL | 包含 low 拐点 |
+| is_bidirectional | BOOL | has_high AND has_low（双向记忆，最强信号） |
+| line_strength | FLOAT64 | 综合强度分 |
+| first_touch_ts | INT64 | 最早拐点时间戳 |
+| last_touch_ts | INT64 | 最近拐点时间戳 |
+| first_touch_idx | INT64 | 最早拐点在窗口内的索引 |
+| last_touch_idx | INT64 | 最近拐点在窗口内的索引 |
+
+**下游用途**: 直接传入 Stage 4 作为 Fib 拟合输入；直接写入 zone.parquet 作为 zone
 
 ---
 
-## Stage 4: Fib 网格拟合 + 6组生命周期
+## Stage 4: Fib 拟合与解释层（v3 重构）
 
-这是最复杂的阶段，**也是 v2 改动最大的阶段**。拆解为两个子步骤：
+### 核心理念
 
-### 4a. Fib 网格拟合 (`_compute_fib_at`)
+- Fib 是**解释者**：用价格线的分布来寻找最优 Fib 网格
+- 每条 Fib 线追溯到对应的价格线来源（有锚点）或标记为推算（无锚点）
+- fib_quality 量化拟合可信度，低于阈值时 price_lines 仍然有效输出
 
-#### 输入
+### 输入
 
 | 字段 | 来源 | 说明 |
 |:--|:--|:--|
-| feature_df[:end_idx] | Stage 2 完整 feature_df 的切片 | 截止到当前 bar 的数据 |
-| target_keys | 循环变量 | `{(mult, direction)}` 指定计算哪组 |
-| cfg.recent_bars | config | 基础窗口长度 |
-| cfg.min_leg_span_pct | config | 最小腿幅度 |
-| cfg.min_fit_score | config | 最低拟合分 |
+| price_lines | Stage 3 输出 | 当前 multiplier 的 PriceLine 列表 |
+| cfg.top_lines_for_fit | config | 参与组合的价格线数量上限 |
+| cfg.std_ratios | config | [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0] |
+| cfg.max_ratio_error | config | ratio 误差容忍上限 (0.05) |
+| cfg.min_leg_span_pct | config | 最小腿跨度 (0.03) |
+| cfg.min_fib_quality | config | 最低拟合质量 (0.2) |
 
-#### 内部流程
+### 处理函数
 
-```
-1. 窗口切片: recent_df = effective_df[actual_start:] (长度 = recent_bars × mult)
-2. 窗口内聚类: cluster_prices(recent_df, "high") + cluster_prices(recent_df, "low")
-3. 合并聚类中心: centers = [(price, conf), ...] 排序
-4. 穷举拟合: fit_fib_grid_to_clusters(centers, direction)
-   - 任取2个center假设对应内层5线中的某2条
-   - 反解 (high, low) → 检查其余center的对齐度
-   - 取分最高的 (high, low)
-5. 生成7条线: levels_from_hl(high, low, direction)
+```python
+fit_fib_to_price_lines(price_lines: List[PriceLine], cfg) -> FibResult
 ```
 
-#### 输出（单次调用返回1条记录）
+**四步逻辑:**
 
-| 字段 | 类型 | 含义 | v2处置 |
-|:--|:--|:--|:--|
-| effective_ts | INT64 | 该组生效时间 | **改为** density_band 的 ts |
-| multiplier | INT64 | 时间倍数 (1/2/3) | **废弃** → 不再按组产出 |
-| direction | VARCHAR | up/down | **改为** fib_direction（可选标注） |
-| score | FLOAT64 | 拟合评分（聚类对齐度） | **改为** band_strength |
-| leg_start_ts | INT64 | 窗口起始 bar ts | **废弃** |
-| leg_end_ts | INT64 | 窗口结束 bar ts | **废弃** |
-| leg_low | FLOAT64 | 反推的 Fib 腿下界 | **改为** fib_leg_low（可选） |
-| leg_high | FLOAT64 | 反推的 Fib 腿上界 | **改为** fib_leg_high（可选） |
-| levels_json | VARCHAR | 7 条线 `[[ratio, price], ...]` | **废弃** → 由 density_band + fib_ratio 替代 |
-| invalidated_ts | FLOAT64 | 失效时间 | **保留** 含义不变 |
-| invalidate_reason | VARCHAR | 失效原因 | **保留** 增加 `replaced` 类型 |
+1. **候选 (H, L) 对生成**: 从 Top-K 价格线两两组合，span/L ≥ min_leg_span_pct
+2. **对齐评分**: 对每对 (H, L)，计算所有价格线与 Fib ratio 的匹配度
+   ```
+   score = H_strength + L_strength + Σ(pl.strength × (1 - error/max_error))
+   ```
+3. **fib_quality 计算**: `best_score / Σ(all line_strength)`，归一化 ∈ [0, 1]
+4. **生成 FibLevel + 锚点标注**: 对每个标准 ratio，计算 fib_price，在 price_lines 中查找 tolerance 范围内最强的锚点
 
-### 4b. 6 组生命周期管理 (`run_pipeline` 主循环)
+### 输出: `step4_fib_result.parquet`
 
-#### 管理状态
-
-| 变量 | 含义 | v2处置 |
+| 字段 | 类型 | 含义 |
 |:--|:--|:--|
-| active[key] | 当前活跃的 (mult, dir) 组记录 | **废弃** → 改为 active_bands[] |
-| break_counts[key] | 连续突破边界计数 | **保留** 但基于 band 而非 (mult,dir) |
-| vacancy_counters[key] | 空置重试计数 | **废弃** → 改为 recalc_interval |
+| compute_ts | INT64 | 本次计算时间戳 |
+| multiplier | INT64 | 来自哪个倍数窗口 |
+| fib_quality | FLOAT64 | 拟合质量 ∈ [0, 1]，越高解释力越强 |
+| leg_high | FLOAT64 | Fib 腿高点 |
+| leg_low | FLOAT64 | Fib 腿低点 |
+| is_valid | BOOL | fib_quality ≥ min_fib_quality |
+| ratio | FLOAT64 | 标准 Fib 比率 (0.0 ~ 1.0) |
+| price | FLOAT64 | 该比率对应的实际价格 |
+| is_anchored | BOOL | True=有价格线来源, False=纯推算 |
+| anchor_center | FLOAT64/null | 来源价格线的 center |
+| anchor_strength | FLOAT64 | 来源价格线的 line_strength (无锚点时为 0) |
 
-#### 逐 bar 检测逻辑
+**每个 multiplier 产出 7 行**（7 条标准 Fib 线）
 
-```
-对每个活跃组:
-  if close > leg_high or close < leg_low:
-    break_count += 1
-    if break_count >= invalidate_break_bars:
-      → 杀死该组，写入 result（带 invalidated_ts）
-      → 重算该 (mult, dir) 的 Fib
-  else:
-    break_count = 0
+### 拟合失败处理
 
-对空置组:
-  vacancy_counter += 1
-  if vacancy_counter >= vacancy_retry_interval:
-    → 尝试重新 fit
-```
-
-#### v2 改造
-
-```
-对每个活跃密度带:
-  if close 连续 N bar 超出 [band_low-buffer, band_high+buffer]:
-    → boundary_break → 标记失效
-  if 连续 N bar 无 close 进入 [band_low, band_high]:
-    → 衰减 band_strength × decay_factor
-    → 连续两次衰减 → 标记失效
-```
-
-### 输出: `step4_legs.parquet`（辅助诊断，非主输出）
-
-| 字段 | 类型 | 含义 | v2处置 |
-|:--|:--|:--|:--|
-| start_idx | INT64 | 腿起点在窗口内索引 | **改为** 腿端点注入记录 |
-| end_idx | INT64 | 腿终点在窗口内索引 | 同上 |
-| start_ts | INT64 | 腿起点时间戳 | 同上 |
-| end_ts | INT64 | 腿终点时间戳 | 同上 |
-| low | FLOAT64 | 腿低点价格 | **保留** → 注入 density_band |
-| high | FLOAT64 | 腿高点价格 | **保留** → 注入 density_band |
-| direction | VARCHAR | up/down | 保留 |
-| span_pct | FLOAT64 | 腿幅度占比 | 保留（用于过滤） |
-| conf_score | FLOAT64 | 腿置信度综合分 | 保留 |
-| multiplier | INT64 | 时间倍数 | 保留（标注来源） |
+当 `fib_quality < min_fib_quality` 时:
+- `is_valid = False`
+- price_lines 仍然正常输出（价格线独立于 Fib）
+- zone.parquet 不受影响（直接来自 price_lines）
 
 ---
 
-## 衍生输出
+## 输出层
 
-### fib.parquet — 逐 bar 前向填充
+### result.parquet（主输出，每 multiplier 一行）
 
-#### 输入: result.parquet
-#### 生成逻辑: 每个 (effective_ts, mult, dir) 的 levels_json 展开为 7 列，前向填充到该组存活的所有 bar
+| 字段 | 类型 | 含义 |
+|:--|:--|:--|
+| effective_ts | INT64 | 生效时间 |
+| multiplier | INT64 | 时间倍数 (1/2/3) |
+| direction | VARCHAR/null | v3 不区分方向，固定 null |
+| fib_quality | FLOAT64 | 拟合质量 |
+| is_valid | BOOL | Fib 拟合是否有效 |
+| leg_high | FLOAT64 | Fib 腿高点 |
+| leg_low | FLOAT64 | Fib 腿低点 |
+| levels_json | VARCHAR | 7条线 JSON: `[{ratio, price, is_anchored, anchor_center, anchor_strength}]` |
+| price_lines_json | VARCHAR | 本次全部价格线 JSON: `[{center, line_strength, hit_count, is_bidirectional}]` |
+| invalidated_ts | INT64/null | 失效时间 |
+| invalidate_reason | VARCHAR/null | 失效原因 |
 
-| 字段 | 类型 | 含义 | v2处置 |
-|:--|:--|:--|:--|
-| ts | INT64 | bar 时间戳 | 保留 |
-| multiplier | INT64 | 1/2/3 | **废弃**，统一填 1 |
-| direction | VARCHAR | up/down | 保留（fib_direction） |
-| fib_0.000 | FLOAT64 | 0%线价位 (leg_high 或 leg_low) | 保留（有 Fib 解释时填入） |
-| fib_0.236 | FLOAT64 | 23.6%线价位 | 保留 |
-| fib_0.382 | FLOAT64 | 38.2%线价位 | 保留 |
-| fib_0.500 | FLOAT64 | 50%线价位 | 保留 |
-| fib_0.618 | FLOAT64 | 61.8%线价位 | 保留 |
-| fib_0.786 | FLOAT64 | 78.6%线价位 | 保留 |
-| fib_1.000 | FLOAT64 | 100%线价位 | 保留 |
-| *center* | FLOAT64 | (新增) 密度带中心 | **新增** |
-| *band_strength* | FLOAT64 | (新增) 带强度 | **新增** |
-| *fib_ratio* | FLOAT64 | (新增) 该行对应的 ratio | **新增** |
+### fib.parquet（前向填充，逐 bar × Fib 线）
 
-### zone.parquet — 持久价位簇
+| 字段 | 类型 | 含义 |
+|:--|:--|:--|
+| ts | INT64 | bar 时间戳 |
+| multiplier | INT64 | 来源窗口 |
+| ratio | FLOAT64 | Fib 比率 |
+| price | FLOAT64 | Fib 价格 |
+| is_anchored | BOOL | 是否有锚点 |
+| anchor_strength | FLOAT64 | 锚点强度 |
 
-#### 输入: result.parquet（现有）→ v2 改为直接来自 density_bands
-#### 当前生成逻辑: 按 effective_ts 片段聚合 42 条 Fib 线
+生成逻辑: `is_valid=True` 的 Fib 线 × 窗口内所有 bar 时间戳，前向填充。
 
-| 字段 | 类型 | 现含义 | v2新含义 |
-|:--|:--|:--|:--|
-| start_ts | INT64 | zone 生效起始 | 不变 |
-| end_ts | INT64 | zone 生效结束 | 不变 |
-| zone_low | FLOAT64 | 簇内最低 Fib 线价格 | → band_low |
-| zone_high | FLOAT64 | 簇内最高 Fib 线价格 | → band_high |
-| zone_mid | FLOAT64 | 簇内中位数 | → center |
-| zone_width | FLOAT64 | high-low | 不变 |
-| consensus | INT64 | 簇内 Fib 线数量(含重复) | → hit_count(真实独立信号) |
-| unique_groups | INT64 | 涉及的(mult,dir)组数 | → 时间段层级数 |
-| hit_mults | VARCHAR | JSON: 参与的 multiplier | 改为 fib_ratio 标注 |
-| hit_dirs | VARCHAR | JSON: 参与的 direction | 保留 |
-| hit_ratios | VARCHAR | JSON: 参与的 ratio | 改为 fib_ratio |
-| zone_lines_json | VARCHAR | 簇内所有线明细 | 废弃 |
+### zone.parquet（直接来自 price_lines）
 
----
+| 字段 | 类型 | 含义 |
+|:--|:--|:--|
+| compute_ts | INT64 | 计算时间戳 |
+| multiplier | INT64 | 来源窗口 |
+| zone_mid | FLOAT64 | = price_line.center |
+| zone_low | FLOAT64 | = center - tolerance |
+| zone_high | FLOAT64 | = center + tolerance |
+| consensus | INT64 | = hit_count（真实拐点命中数） |
+| line_strength | FLOAT64 | 综合强度 |
+| is_bidirectional | BOOL | 双向记忆 |
+| has_high | BOOL | 含压力信号 |
+| has_low | BOOL | 含支撑信号 |
 
-## 关键问题总结（对照 v2 修订计划）
-
-| # | 现有问题 | 现有字段表现 | v2 解决方式 |
-|:-:|:--|:--|:--|
-| 1 | 6组不独立，共享底层数据 | step3 对窗口内数据分别聚类，multiplier 只是窗口大小不同 | 全局聚类一次，multiplier 只贡献腿端点 |
-| 2 | consensus 虚高 | zone.consensus=42 实际是同一腿被3窗口重复计算 | hit_count 基于真实独立拐点数 |
-| 3 | kind 分离丢失双向信息 | step3 分 "high"/"low" 两组聚类 | 合并聚类，新增 is_bidirectional |
-| 4 | Fib 是决定者 | result.levels_json 42条线先画出来 | Fib 只标注已有的 density_band |
-| 5 | 42条线噪音 | fib.parquet 6组×7=42行/bar | 最终 ≤10 个 band，信息清晰 |
-| 6 | 生命周期粒度太粗 | 一条线 break → 整组(7线)失效 | 每个 band 独立生命周期 |
+zone 直接来自 price_lines，不再是 42 条 Fib 线的二次聚合。consensus 含义从「簇内 Fib 线数量」变为「真实拐点命中数」。
 
 ---
 
-## 简化路线图（实施优先级）
+## 配置参数（v3 当前值）
+
+### Stage 1/2 参数（保留不变）
+
+| 参数 | 默认值 | 作用 |
+|:--|:--|:--|
+| pivot_windows | [[5,5],[8,8]] | 局部极值窗口 |
+| zigzag_thresholds | [0.05, 0.10] | 幅度反转阈值 |
+| regression_windows | [50, 100] | 回归窗口 |
+| weights | {pivot_5:0.5, pivot_8:1.0, ...} | 方法权重 |
+
+### Stage 3 参数
+
+| 参数 | 默认值 | 作用 | 影响 |
+|:--|:--|:--|:--|
+| min_cluster_conf | 0.3 | 进入候选的最低置信度 | 越高 → 候选越少 |
+| cluster_tolerance_pct | 0.005 | 聚类容差 (× price_range) | 越大 → 合并越多 → N 越小 |
+| max_price_lines | 12 | 输出上限 | 硬限制 |
+| min_line_strength | 0.5 | 最低强度门槛 | 越高 → 弱线被过滤 → N 越小 |
+
+### Stage 4 参数
+
+| 参数 | 默认值 | 作用 |
+|:--|:--|:--|
+| top_lines_for_fit | 8 | 参与 (H,L) 组合的价格线数量 |
+| max_ratio_error | 0.05 | ratio 误差容忍上限 (5%) |
+| min_fib_quality | 0.2 | Fib 拟合最低质量门槛 |
+| std_ratios | [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0] | 标准比率列表 |
+| min_leg_span_pct | 0.03 | 最小腿跨度 |
+
+### 窗口与生命周期参数
+
+| 参数 | 默认值 | 作用 |
+|:--|:--|:--|
+| recent_bars | 90 | 基础窗口长度 |
+| skip_recent | 10 | 跳过末尾 N 根 bar |
+| invalidate_break_bars | 3 | 连续突破 N bar 则失效 |
+| band_decay_factor | 0.7 | 无触碰衰减系数 |
+| band_decay_n | 0.20 | 触发衰减的无触碰 bar 比例 |
+| recalc_interval | 20 | 定期全量重算间隔 |
+
+---
+
+## Profile 配置一览
+
+| Profile | 定位 | max_price_lines | min_line_strength | min_cluster_conf | recent_bars |
+|:--|:--|:--|:--|:--|:--|
+| fib001 | 短期敏感 | 10 | 0.3 | 0.2 | 60 |
+| fib002 | 中期平衡 | 8 | 0.5 | 0.3 | 90 |
+| fib003 | 长期稳健 | 6 | 0.5 | 0.5 | 150 |
+| fib004 | 宽松聚类 | 15 | 0.2 | 0.15 | 120 |
+| fib005 | 超长周期 | 5 | 0.5 | 0.4 | 200 |
+
+---
+
+## 实际产出示例 (885003.WI / 1d / fib002)
+
+### Stage 3 价格线
+
+| mult | center | hit_count | line_strength | 类型 |
+|:--|:--|:--|:--|:--|
+| 1 | 5020.4 | 1 | 0.67 | 支撑 |
+| 1 | 5206.0 | 1 | 0.67 | 压力 |
+| 2 | 5152.0 | 2 | 1.86 | 双向 |
+| 2 | 4981.8 | 2 | 1.09 | 支撑 |
+| 3 | 4981.0 | 5 | 3.57 | 双向 |
+| 3 | 4977.2 | 3 | 2.24 | 双向 |
+| 3 | 5152.0 | 2 | 1.68 | 双向 |
+| 3 | 5044.1 | 2 | 1.31 | 双向 |
+
+### Stage 4 Fib 拟合
+
+| mult | fib_quality | leg_high | leg_low | 锚定数 |
+|:--|:--|:--|:--|:--|
+| 1 | 1.000 | 5206.0 | 5020.4 | 2/7 |
+| 2 | 0.711 | 5152.0 | 4977.4 | 2/7 |
+| 3 | 0.689 | 5152.0 | 4981.0 | 4/7 |
+
+---
+
+## 与旧方案的关键差异
+
+| 维度 | 旧方案 (v1) | 当前方案 (v3) |
+|:--|:--|:--|
+| 核心输入 | 拐点 → 直接拟合6组Fib → 42条线 | 拐点 → 价格线(N条) → Fib解释 |
+| 第一公民 | Fib 组 (6组×7条) | 价格线 (N条, 参数可控) |
+| Fib 角色 | 决定者: 先画框架 | 解释者: 价格线先存在, Fib 命名它们 |
+| N 的控制 | 固定6组 | 完全由聚类参数决定 |
+| 强度来源 | 拟合分 (conf_score) | 真实拐点数量 + 置信度 + 时间跨度 |
+| 无法 Fib 解释的位置 | 被丢弃 | 依然作为价格线输出 |
+| zone 的 consensus | 虚高 (42线重复计数) | 真实 hit_count |
+| 锚点追溯 | 无 | 每条Fib线标注 is_anchored + anchor |
+| 拟合质量 | 无归一化指标 | fib_quality ∈ [0, 1] |
+
+---
+
+## 文件布局
 
 ```
-Phase 1 (保留):  Stage 1 + Stage 2 → 代码不动，输出不变
-Phase 2 (重写):  Stage 3 → build_price_density() 全局合并聚类
-Phase 3 (新增):  Stage 3b → inject_leg_endpoints() 腿端点注入
-Phase 4 (重写):  Stage 4 → explain_with_fib() Fib 解释层
-Phase 5 (重写):  pipeline.py → 密度带生命周期（替代6组管理）
-Phase 6 (适配):  输出格式 + Grafana Dashboard
+warehouse/timing/computation/fib_retracement/
+└── {profile}/
+    └── {symbol}/
+        └── {interval}/
+            ├── step3_price_lines.parquet   (Stage 3 中间结果)
+            ├── step4_fib_result.parquet    (Stage 4 中间结果)
+            ├── result.parquet             (主输出)
+            ├── fib.parquet                (前向填充衍生)
+            └── zone.parquet               (价格线直接导出)
 ```
+
+---
+
+## Grafana 面板
+
+| 面板 | 类型 | 数据来源 | 展示内容 |
+|:--|:--|:--|:--|
+| Stage3: 价格线聚合 | timeseries | step3_price_lines.parquet | K线 + 3×mult 的价格线水平线 (红/蓝/绿) |
+| Stage3: 价格线详情 | table | step3_price_lines.parquet | 窗口/中心/命中数/强度/类型 |
+| Stage4: Fib拟合详情 | table | step4_fib_result.parquet | ratio/价格/锚定状态/锚点强度 |
+| Stage4: K线+最优Fib网格 | timeseries | step4_fib_result.parquet | K线 + 7条Fib水平线 |
+| 输出: Zone色带 | timeseries | zone.parquet | K线 + Top-5价格线的±tolerance色带 |
+| 总览: Fib拟合质量 | table | step4_fib_result.parquet | 各窗口的fib_quality/锚定数汇总 |

@@ -15,3 +15,12 @@ trend_min_move_pct = 0.01
 min_fit_score = 0.1
 invalidate_break_bars = 3
 vacancy_retry_interval = 5
+# v3 新增参数
+max_price_lines = 10
+min_line_strength = 0.3
+top_lines_for_fit = 8
+max_ratio_error = 0.05
+min_fib_quality = 0.2
+band_decay_factor = 0.7
+band_decay_n = 0.25
+recalc_interval = 15

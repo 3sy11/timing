@@ -10,3 +10,12 @@ cluster_tolerance_pct = 0.012
 min_cluster_conf = 0.15
 scan_bars = 20
 min_bars = 200
+# v3 新增参数
+max_price_lines = 15
+min_line_strength = 0.2
+top_lines_for_fit = 10
+max_ratio_error = 0.05
+min_fib_quality = 0.15
+band_decay_factor = 0.7
+band_decay_n = 0.25
+recalc_interval = 15
