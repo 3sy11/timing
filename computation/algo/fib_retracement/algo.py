@@ -653,30 +653,41 @@ def aggregate_price_lines(feature_df: pd.DataFrame, cfg) -> List[PriceLine]:
 # ═══════════════════════════════════════════════════
 
 def fit_fib_to_price_lines(price_lines: List[PriceLine], cfg) -> FibResult:
-    """v3 Stage 4: 从 price_lines 中找最优 (H, L) 对拟合 Fib 网格。
-    每条 Fib 线追溯锚点来源（有来源的 is_anchored=True）。
+    """v3 Stage 4: 从 price_lines 中找最优 Fib 网格。
+    锚定逻辑: 两条价格线作为 ratio=0.236 和 ratio=0.786 的铆钉，
+    从中反推 H(1.0) 和 L(0.0)，0%/100% 是推断结果而非锚点。
     """
     if len(price_lines) < 2:
         return FibResult(is_valid=False, price_lines=price_lines)
     std_ratios = cfg.std_ratios
     top_k = min(cfg.top_lines_for_fit, len(price_lines))
     top_lines = sorted(price_lines, key=lambda x: x.line_strength, reverse=True)[:top_k]
-    # 第一步: 两两组合生成候选 (H, L)
-    best_score, best_H, best_L = 0.0, None, None
+    # 锚定比率: 0.236 对应高锚点, 0.786 对应低锚点
+    R_HIGH_ANCHOR = 0.786  # 高价格锚点对应的 ratio
+    R_LOW_ANCHOR = 0.236   # 低价格锚点对应的 ratio
+    ANCHOR_SPAN = R_HIGH_ANCHOR - R_LOW_ANCHOR  # 0.55
+    # 第一步: 两两组合, 高价=0.786锚点, 低价=0.236锚点, 反推 (H, L)
+    best_score, best_high_anchor, best_low_anchor = 0.0, None, None
+    best_H, best_L = 0.0, 0.0
     for i in range(len(top_lines)):
         for j in range(i + 1, len(top_lines)):
-            h_line = top_lines[i] if top_lines[i].center > top_lines[j].center else top_lines[j]
-            l_line = top_lines[j] if top_lines[i].center > top_lines[j].center else top_lines[i]
-            H, L = h_line.center, l_line.center
-            span = H - L
-            if span / L < cfg.min_leg_span_pct:
+            hi = top_lines[i] if top_lines[i].center > top_lines[j].center else top_lines[j]
+            lo = top_lines[j] if top_lines[i].center > top_lines[j].center else top_lines[i]
+            # hi → ratio=0.786 锚点, lo → ratio=0.236 锚点
+            anchor_span = hi.center - lo.center
+            if anchor_span <= 0:
+                continue
+            full_span = anchor_span / ANCHOR_SPAN
+            L = lo.center - R_LOW_ANCHOR * full_span
+            H = L + full_span
+            if L <= 0 or full_span / L < cfg.min_leg_span_pct:
                 continue
             # 第二步: 对齐评分
-            score = h_line.line_strength + l_line.line_strength
+            score = hi.line_strength + lo.line_strength
             for pl in price_lines:
-                if pl is h_line or pl is l_line:
+                if pl is hi or pl is lo:
                     continue
-                ratio = (pl.center - L) / span
+                ratio = (pl.center - L) / full_span
                 if ratio < -0.05 or ratio > 1.05:
                     continue
                 nearest_std = min(std_ratios, key=lambda r: abs(r - ratio))
@@ -684,25 +695,33 @@ def fit_fib_to_price_lines(price_lines: List[PriceLine], cfg) -> FibResult:
                 if error <= cfg.max_ratio_error:
                     score += pl.line_strength * (1.0 - error / cfg.max_ratio_error)
             if score > best_score:
-                best_score, best_H, best_L = score, h_line, l_line
-    if best_H is None or best_L is None:
+                best_score = score
+                best_high_anchor, best_low_anchor = hi, lo
+                best_H, best_L = H, L
+    if best_high_anchor is None:
         return FibResult(is_valid=False, price_lines=price_lines)
     # 第三步: fib_quality
     max_possible = sum(pl.line_strength for pl in price_lines)
     fib_quality = best_score / max_possible if max_possible > 0 else 0.0
     is_valid = fib_quality >= cfg.min_fib_quality
     # 第四步: 生成 FibLevel, 标注锚点
-    H, L = best_H.center, best_L.center
+    H, L = best_H, best_L
     span = H - L
     levels = []
     for ratio in std_ratios:
         fib_price = L + span * ratio
-        # 找最接近的价格线作为锚点
         anchor = None
-        for pl in price_lines:
-            if abs(pl.center - fib_price) <= pl.tolerance:
-                if anchor is None or pl.line_strength > anchor.line_strength:
-                    anchor = pl
+        # 0.236 和 0.786 是确定锚定的 (来自选中的两条线)
+        if abs(ratio - R_LOW_ANCHOR) < 0.001:
+            anchor = best_low_anchor
+        elif abs(ratio - R_HIGH_ANCHOR) < 0.001:
+            anchor = best_high_anchor
+        else:
+            # 其余 ratio 在 price_lines 中找锚点
+            for pl in price_lines:
+                if abs(pl.center - fib_price) <= pl.tolerance:
+                    if anchor is None or pl.line_strength > anchor.line_strength:
+                        anchor = pl
         levels.append(FibLevel(
             ratio=round(ratio, 4), price=round(fib_price, 4),
             is_anchored=anchor is not None,
@@ -710,8 +729,9 @@ def fit_fib_to_price_lines(price_lines: List[PriceLine], cfg) -> FibResult:
             anchor_strength=round(anchor.line_strength, 4) if anchor else 0.0,
         ))
     anchored_count = sum(1 for lv in levels if lv.is_anchored)
-    log.info(f'[fit_fib_to_price_lines] H={H:.1f} L={L:.1f} quality={fib_quality:.3f} '
-             f'valid={is_valid} anchored={anchored_count}/7')
+    log.info(f'[fit_fib_to_price_lines] anchor_hi={best_high_anchor.center:.1f}(0.786) '
+             f'anchor_lo={best_low_anchor.center:.1f}(0.236) → H={H:.1f} L={L:.1f} '
+             f'quality={fib_quality:.3f} valid={is_valid} anchored={anchored_count}/7')
     return FibResult(
         is_valid=is_valid, fib_quality=round(fib_quality, 4),
         leg_high=round(H, 4), leg_low=round(L, 4),

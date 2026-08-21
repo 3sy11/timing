@@ -1,6 +1,7 @@
 """Analyze command — 分析模块 CLI 入口。
 
 流程：resolve rule → load profile → read data via protocol → detect → write signals
+支持 fib_touch(旧) 和 price_touch(v3) 两种规则。
 """
 import logging
 from datetime import datetime, timezone
@@ -38,41 +39,40 @@ class Analyze(BaseCommand):
         cfg = config_class.from_profile(profile_name, override_list)
 
         proto = app.protocol
-        sorted_ts, ts_groups, invalids = proto.read_structures_timeseries(
-            upstream_algo, self.compute_id, self.symbol, self.interval)
-        if not sorted_ts:
-            log.error(f'[分析] 无结构数据: {upstream_algo}/{self.compute_id}/{self.symbol}/{self.interval}')
-            return None
 
-        klines = proto.read_klines(self.symbol, self.interval)
-        if not klines:
-            log.error(f'[分析] 无 klines: {self.symbol}/{self.interval}')
-            return None
-
-        def groups_resolver(bar_ts):
-            return proto.get_groups_at(sorted_ts, ts_groups, invalids, bar_ts)
-
-        log.info(f'[分析] 开始检测 rule={self.rule} analysis_id={self.analysis_id} '
-                 f'ts_points={len(sorted_ts)} klines={len(klines)}')
-        result = detect_fn(klines, [], cfg=cfg, groups_resolver=groups_resolver)
+        if self.rule == "price_touch":
+            klines_df = proto.read_klines_df(self.symbol, self.interval)
+            if klines_df.empty:
+                log.error(f'[分析] 无 klines: {self.symbol}/{self.interval}'); return None
+            resolver = proto.build_history_resolver(upstream_algo, self.compute_id, self.symbol, self.interval)
+            log.info(f'[分析] 开始检测 rule={self.rule} analysis_id={self.analysis_id} klines={len(klines_df)}')
+            result = detect_fn(klines_df, resolver, cfg, compute_id=self.compute_id)
+            for s in result["signals"]:
+                s["symbol"] = self.symbol
+        else:
+            sorted_ts, ts_groups, invalids = proto.read_structures_timeseries(
+                upstream_algo, self.compute_id, self.symbol, self.interval)
+            if not sorted_ts:
+                log.error(f'[分析] 无结构数据: {upstream_algo}/{self.compute_id}/{self.symbol}/{self.interval}')
+                return None
+            klines = proto.read_klines(self.symbol, self.interval)
+            if not klines:
+                log.error(f'[分析] 无 klines: {self.symbol}/{self.interval}'); return None
+            def groups_resolver(bar_ts):
+                return proto.get_groups_at(sorted_ts, ts_groups, invalids, bar_ts)
+            log.info(f'[分析] 开始检测 rule={self.rule} analysis_id={self.analysis_id} klines={len(klines)}')
+            result = detect_fn(klines, [], cfg=cfg, groups_resolver=groups_resolver)
 
         proto.write_signals(result["signals"], self.analysis_id, self.symbol, self.interval)
-
         manifest = {
-            "analysis_id": self.analysis_id,
-            "rule": self.rule,
-            "upstream_algo": upstream_algo,
-            "compute_id": self.compute_id,
-            "symbol": self.symbol,
-            "interval": self.interval,
+            "analysis_id": self.analysis_id, "rule": self.rule,
+            "upstream_algo": upstream_algo, "compute_id": self.compute_id,
+            "symbol": self.symbol, "interval": self.interval,
             "created_at": datetime.now(timezone.utc).astimezone().isoformat(),
             "status": "completed",
             "config": {k: v for k, v in cfg.items() if not k.startswith("_")},
-            "config_source": cfg.config_source,
-            "summary": result["summary"],
-            "klines_count": len(klines),
+            "config_source": cfg.config_source, "summary": result["summary"],
         }
         proto.write_manifest(manifest, self.analysis_id, self.symbol, self.interval)
-
         log.info(f'[分析] 完成 analysis_id={self.analysis_id} → {result["summary"]}')
         return result["summary"]

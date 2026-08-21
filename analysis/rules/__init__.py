@@ -2,9 +2,11 @@
 from typing import Dict
 
 from .fib_touch import RULE_META as fib_touch_meta
+from .price_touch import RULE_META as price_touch_meta
 
 RULE_REGISTRY: Dict[str, dict] = {
     "fib_touch": fib_touch_meta,
+    "price_touch": price_touch_meta,
 }
 
 

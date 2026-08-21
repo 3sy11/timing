@@ -1,0 +1,10 @@
+proximity_k = 0.5
+min_strength = 0.3
+cooldown_bars = 3
+min_fib_quality = 0.0
+w_proximity = 0.4
+w_line = 0.3
+w_fib = 0.2
+w_bidir = 0.1
+scan_bars = 0
+include_inferred_fib = false
