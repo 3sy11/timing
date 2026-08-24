@@ -6,7 +6,6 @@ log = logging.getLogger(__name__)
 DEFAULTS = {
     "proximity_k": 0.5,           # 检测半径 = center × proximity_k × 0.01 (即0.5%)
     "min_strength": 0.3,
-    "cooldown_bars": 3,
     "min_fib_quality": 0.0,
     "w_proximity": 0.4,
     "w_line": 0.3,

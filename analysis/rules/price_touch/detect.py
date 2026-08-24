@@ -3,11 +3,11 @@
 逻辑:
 1. 获取当前 bar_ts 有效的 PriceLine + FibLevel 结构
 2. 逐 PriceLine 检测 proximity
-3. 规则链: proximity门槛 → 强度门槛 → 冷却期 → (可选)Fib质量
+3. 规则链: proximity门槛 → 强度门槛 → zone锁定(新zone解锁旧zone) → (可选)Fib质量
 4. 通过 → 计算 strength → 产出信号
 """
 import logging
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional
 import pandas as pd
 from .config import PriceTouchConfig
 
@@ -28,10 +28,14 @@ def _normalize_line_strength(strength: float, max_strength: float) -> float:
     return min(strength / max_strength, 1.0)
 
 
-def detect_bar(close: float, bar_ts: int, snapshot: dict, cooldown_state: Dict[Tuple, int],
-               bar_idx: int, cfg: PriceTouchConfig) -> List[dict]:
-    """对单根 bar 检测所有 multiplier 的 PriceLine 触碰。"""
-    signals = []
+def detect_bar(close: float, bar_ts: int, snapshot: dict,
+               lock_state: Dict[str, Optional[float]],
+               cfg: PriceTouchConfig) -> List[dict]:
+    """对单根 bar 检测所有 multiplier 的 PriceLine 触碰。
+    lock_state: {"locked": center|None} — 全局共享锁定状态，
+    同一 zone 不重复产出信号，直到新 zone 触发后解锁。所有 multiplier 共享锁。
+    """
+    candidates = []
     for mult, snap in snapshot.items():
         price_lines = snap["price_lines"]
         fib_levels = snap.get("fib_levels", [])
@@ -55,28 +59,32 @@ def detect_bar(close: float, bar_ts: int, snapshot: dict, cooldown_state: Dict[T
             line_strength = pl["line_strength"]
             if line_strength < cfg.min_strength:
                 continue
-            cool_key = (mult, round(center, 2))
-            last_fire = cooldown_state.get(cool_key, -999)
-            if bar_idx - last_fire < cfg.cooldown_bars:
-                continue
             is_fib_backed = center in anchor_map
-            cur_fib_quality = fib_quality if is_fib_backed else 0.0
             if cfg.min_fib_quality > 0 and is_fib_backed and fib_quality < cfg.min_fib_quality:
                 continue
             norm_str = _normalize_line_strength(line_strength, max_str)
-            strength = round(
-                proximity * cfg.w_proximity
-                + norm_str * cfg.w_line
-                + cur_fib_quality * cfg.w_fib
-                + (cfg.w_bidir if pl.get("is_bidirectional") else 0.0), 4)
+            base_w = cfg.w_proximity + cfg.w_line + cfg.w_bidir
+            base_score = (proximity * cfg.w_proximity + norm_str * cfg.w_line
+                         + (cfg.w_bidir if pl.get("is_bidirectional") else 0.0)) / base_w if base_w > 0 else 0.0
+            if is_fib_backed:
+                strength = round(fib_quality * 0.5 + base_score * 0.5, 4)
+            else:
+                strength = round(base_score, 4)
             strength = min(max(strength, 0.0), 1.0)
             direction = _calc_direction(pl.get("has_high", False), pl.get("has_low", False), close, center)
-            cooldown_state[cool_key] = bar_idx
             fib_ratio = anchor_map[center]["ratio"] if is_fib_backed else None
-            signals.append({"ts": bar_ts, "close": close, "direction": direction,
-                           "strength": strength, "price": close, "level": center,
-                           "multiplier": mult, "fib_ratio": fib_ratio})
-    return signals
+            candidates.append({"center": round(center, 2), "ts": bar_ts, "close": close,
+                              "direction": direction, "strength": strength, "price": close,
+                              "level": center, "multiplier": mult, "fib_ratio": fib_ratio})
+    if not candidates:
+        return []
+    locked_center = lock_state.get("locked")
+    new_candidates = [c for c in candidates if c["center"] != locked_center]
+    if not new_candidates:
+        return []
+    best = max(new_candidates, key=lambda c: c["strength"])
+    lock_state["locked"] = best["center"]
+    return [{k: v for k, v in best.items() if k != "center"}]
 
 
 def run_detection(klines_df: pd.DataFrame, resolver: Callable, cfg: PriceTouchConfig = None,
@@ -92,13 +100,13 @@ def run_detection(klines_df: pd.DataFrame, resolver: Callable, cfg: PriceTouchCo
     closes = klines_df["close"].tolist()
     ts_list = klines_df["ts"].tolist()
     all_signals: List[dict] = []
-    cooldown_state: Dict[Tuple, int] = {}
+    lock_state: Dict[str, Optional[float]] = {"locked": None}
     for i in range(start, n):
         bar_ts = int(ts_list[i])
         snapshot = resolver(bar_ts)
         if not snapshot:
             continue
-        sigs = detect_bar(closes[i], bar_ts, snapshot, cooldown_state, i, cfg)
+        sigs = detect_bar(closes[i], bar_ts, snapshot, lock_state, cfg)
         for s in sigs:
             s["compute_id"] = compute_id
         all_signals.extend(sigs)
