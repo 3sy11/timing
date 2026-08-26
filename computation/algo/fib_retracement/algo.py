@@ -3,10 +3,10 @@
 所有函数不依赖 app/hub，可在 notebook / 测试中直接调用。
 """
 import logging, math
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 import pandas as pd
 from .config import RetracementConfig
-from .models import TrendLeg, FibGroup, DensityBand, PriceLine, FibLevel, FibResult
+from .models import TrendLeg, FibGroup, DensityBand, PriceLine, FibLevel, FibResult, Line
 
 log = logging.getLogger(__name__)
 
@@ -682,7 +682,8 @@ def fit_fib_to_price_lines(price_lines: List[PriceLine], cfg) -> FibResult:
             H = L + full_span
             if L <= 0 or full_span / L < cfg.min_leg_span_pct:
                 continue
-            # 第二步: 对齐评分
+            # 第二步: 对齐评分 (只考虑内层ratio, 0和1是数学推导不参与)
+            inner_ratios = [r for r in std_ratios if 0.001 < r < 0.999]
             score = hi.line_strength + lo.line_strength
             for pl in price_lines:
                 if pl is hi or pl is lo:
@@ -690,7 +691,7 @@ def fit_fib_to_price_lines(price_lines: List[PriceLine], cfg) -> FibResult:
                 ratio = (pl.center - L) / full_span
                 if ratio < -0.05 or ratio > 1.05:
                     continue
-                nearest_std = min(std_ratios, key=lambda r: abs(r - ratio))
+                nearest_std = min(inner_ratios, key=lambda r: abs(r - ratio))
                 error = abs(ratio - nearest_std)
                 if error <= cfg.max_ratio_error:
                     score += pl.line_strength * (1.0 - error / cfg.max_ratio_error)
@@ -717,11 +718,13 @@ def fit_fib_to_price_lines(price_lines: List[PriceLine], cfg) -> FibResult:
         elif abs(ratio - R_HIGH_ANCHOR) < 0.001:
             anchor = best_high_anchor
         else:
-            # 其余 ratio 在 price_lines 中找锚点
+            # 其余 ratio: 直接找最近的 detected 线作为 anchor
+            best_dist = float('inf')
             for pl in price_lines:
-                if abs(pl.center - fib_price) <= pl.tolerance:
-                    if anchor is None or pl.line_strength > anchor.line_strength:
-                        anchor = pl
+                d = abs(pl.center - fib_price)
+                if d < best_dist:
+                    best_dist = d
+                    anchor = pl
         levels.append(FibLevel(
             ratio=round(ratio, 4), price=round(fib_price, 4),
             is_anchored=anchor is not None,
@@ -916,3 +919,292 @@ def compute_fib_retracement(klines: List[dict], cfg: RetracementConfig = None) -
             "wmap": wmap, "groups": all_groups, "steps": step_results,
             "legs_found": sum(s["raw_legs"] for s in step_results),
             "legs_kept": sum(s["ranked_legs"] for s in step_results)}
+
+
+# ═══════════════════════════════════════════════════
+#  统一 Line 输出接口 (v4: 替代旧 parquet 分文件方案)
+# ═══════════════════════════════════════════════════
+
+def compute_lines_snapshot(feature_df: pd.DataFrame, cfg, compute_ts: int,
+                           compute_bar_idx: int) -> List[Line]:
+    """对一个时间点计算完整快照, 输出 List[Line]。
+    1. 各 multiplier 独立产出 detected 线 (窗口不同看到的共识线不同)
+    2. 合并所有 detected 线做统一 Fib 拟合, 输出 top-N 组最优 Fib
+    """
+    all_detected: List[Line] = []
+    all_price_lines: List[PriceLine] = []
+    mult_price_lines: Dict[int, List[PriceLine]] = {}
+    for multiplier in (1, 2, 3):
+        target_bars = cfg.recent_bars * multiplier
+        actual_start = adaptive_window_start(feature_df, target_bars, min_conf=cfg.min_cluster_conf)
+        recent_df = feature_df.iloc[actual_start:].reset_index(drop=True)
+        if len(recent_df) < 10:
+            continue
+        price_lines = aggregate_price_lines(recent_df, cfg)
+        if not price_lines:
+            continue
+        mult_price_lines[multiplier] = price_lines
+        for pl in price_lines:
+            all_detected.append(Line(
+                compute_ts=compute_ts, compute_bar_idx=compute_bar_idx,
+                multiplier=multiplier, type="detected", center=round(pl.center, 2),
+                hit_count=pl.hit_count, total_conf=round(pl.total_conf, 4),
+                time_span_ratio=round(pl.time_span_ratio, 4),
+                has_high=pl.has_high, has_low=pl.has_low, is_bidirectional=pl.is_bidirectional,
+                strength=round(pl.line_strength, 4), tolerance=round(pl.tolerance, 2),
+            ))
+    if not all_detected:
+        return []
+    # 合并去重: 不同 multiplier 可能发现相同价位的线, 按 center 合并取最强
+    merged_map: Dict[float, PriceLine] = {}
+    for mult, pls in mult_price_lines.items():
+        for pl in pls:
+            key = round(pl.center, 2)
+            if key not in merged_map or pl.line_strength > merged_map[key].line_strength:
+                merged_map[key] = pl
+    merged_lines = sorted(merged_map.values(), key=lambda x: x.line_strength, reverse=True)
+    # Fib 拟合: 用合并后的全部 detected 线, 选出 top-3 组
+    top_n_fib = getattr(cfg, 'top_fib_groups', 3)
+    fib_groups = fit_fib_top_n(merged_lines, cfg, top_n=top_n_fib)
+    # 输出 fib lines
+    lines = list(all_detected)
+    for rank, fib_result in enumerate(fib_groups):
+        H, L, quality = fib_result.leg_high, fib_result.leg_low, fib_result.fib_quality
+        for lv in fib_result.levels:
+            if abs(lv.ratio) < 0.001 or abs(lv.ratio - 1.0) < 0.001:
+                ltype = "fib_extended"
+            else:
+                ltype = "fib_anchored"
+            lines.append(Line(
+                compute_ts=compute_ts, compute_bar_idx=compute_bar_idx,
+                multiplier=rank + 1, type=ltype, center=round(lv.price, 2),
+                fib_ratio=round(lv.ratio, 4), fib_quality=round(quality, 4),
+                fib_leg_high=round(H, 2), fib_leg_low=round(L, 2),
+                anchor_center=round(lv.price - lv.anchor_center, 2) if lv.anchor_center else None,
+                strength=round(lv.anchor_strength, 4) if lv.anchor_strength else 0.0,
+            ))
+    det_count = len(all_detected)
+    fib_count = len(lines) - det_count
+    log.info(f'[compute_lines_snapshot] detected={det_count} fib_groups={len(fib_groups)} fib_lines={fib_count} total={len(lines)}')
+    return lines
+
+
+def fit_fib_top_n(price_lines: List[PriceLine], cfg, top_n: int = 3) -> List[FibResult]:
+    """从合并的 price_lines 中拟合出 top-N 组最优 Fib 网格 (互不重叠)。"""
+    if len(price_lines) < 2:
+        return []
+    std_ratios = cfg.std_ratios
+    inner_ratios = [r for r in std_ratios if 0.001 < r < 0.999]
+    top_k = min(cfg.top_lines_for_fit, len(price_lines))
+    top_lines = sorted(price_lines, key=lambda x: x.line_strength, reverse=True)[:top_k]
+    R_HIGH_ANCHOR, R_LOW_ANCHOR = 0.786, 0.236
+    ANCHOR_SPAN = R_HIGH_ANCHOR - R_LOW_ANCHOR
+    # 收集所有候选 (H, L, score, hi_anchor, lo_anchor)
+    candidates = []
+    for i in range(len(top_lines)):
+        for j in range(i + 1, len(top_lines)):
+            hi = top_lines[i] if top_lines[i].center > top_lines[j].center else top_lines[j]
+            lo = top_lines[j] if top_lines[i].center > top_lines[j].center else top_lines[i]
+            anchor_span = hi.center - lo.center
+            if anchor_span <= 0:
+                continue
+            full_span = anchor_span / ANCHOR_SPAN
+            L = lo.center - R_LOW_ANCHOR * full_span
+            H = L + full_span
+            if L <= 0 or full_span / L < cfg.min_leg_span_pct:
+                continue
+            score = hi.line_strength + lo.line_strength
+            for pl in price_lines:
+                if pl is hi or pl is lo:
+                    continue
+                ratio = (pl.center - L) / full_span
+                if ratio < -0.05 or ratio > 1.05:
+                    continue
+                nearest_std = min(inner_ratios, key=lambda r: abs(r - ratio))
+                error = abs(ratio - nearest_std)
+                if error <= cfg.max_ratio_error:
+                    score += pl.line_strength * (1.0 - error / cfg.max_ratio_error)
+            candidates.append((score, H, L, hi, lo))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    # 选 top-N, 要求 H/L 不重叠 (重叠=两组的价格区间交叉超过50%)
+    max_possible = sum(pl.line_strength for pl in price_lines)
+    results = []
+    used_ranges = []
+    for score, H, L, hi_anchor, lo_anchor in candidates:
+        if len(results) >= top_n:
+            break
+        # 重叠检查
+        overlap = False
+        for uH, uL in used_ranges:
+            inter_lo, inter_hi = max(L, uL), min(H, uH)
+            if inter_hi > inter_lo:
+                overlap_pct = (inter_hi - inter_lo) / min(H - L, uH - uL)
+                if overlap_pct > 0.5:
+                    overlap = True; break
+        if overlap:
+            continue
+        fib_quality = score / max_possible if max_possible > 0 else 0.0
+        if fib_quality < cfg.min_fib_quality:
+            continue
+        # 生成 levels
+        span = H - L
+        levels = []
+        for ratio in std_ratios:
+            fib_price = L + span * ratio
+            anchor = None
+            if abs(ratio - R_LOW_ANCHOR) < 0.001:
+                anchor = lo_anchor
+            elif abs(ratio - R_HIGH_ANCHOR) < 0.001:
+                anchor = hi_anchor
+            else:
+                best_dist = float('inf')
+                for pl in price_lines:
+                    d = abs(pl.center - fib_price)
+                    if d < best_dist:
+                        best_dist = d; anchor = pl
+            levels.append(FibLevel(
+                ratio=round(ratio, 4), price=round(fib_price, 4),
+                is_anchored=anchor is not None,
+                anchor_center=round(anchor.center, 4) if anchor else None,
+                anchor_strength=round(anchor.line_strength, 4) if anchor else 0.0,
+            ))
+        results.append(FibResult(
+            is_valid=True, fib_quality=round(fib_quality, 4),
+            leg_high=round(H, 4), leg_low=round(L, 4),
+            levels=levels, price_lines=price_lines,
+        ))
+        used_ranges.append((H, L))
+    log.info(f'[fit_fib_top_n] candidates={len(candidates)} selected={len(results)} '
+             f'qualities={[r.fib_quality for r in results]}')
+    return results
+
+
+# ═══════════════════════════════════════════════════
+#  全局 Fib 拟合管线 (v5): 全配对 → 聚类 → 覆盖选取 → ratio线
+# ═══════════════════════════════════════════════════
+
+def fit_fib_global(centers: List[float], cfg) -> List[Tuple[float, float]]:
+    """全历史 PriceLine 全配对拟合, 产出所有有效 Fib (leg_low, leg_high)。
+    有效条件: 0.236/0.786 由两条PL锚定 + 0%/0.382/0.5/0.618 全部命中PL。
+    """
+    import numpy as np
+    arr = np.array(sorted(set(round(c, 2) for c in centers)))
+    n = len(arr)
+    if n < 2: return []
+    base_tol = getattr(cfg, 'fit_tolerance_pct', 0.003)
+    tol_pct = base_tol * max(1.0, 80.0 / n)  # 稀疏时自适应放宽容差
+    min_spread = getattr(cfg, 'fit_min_spread_pct', 0.02)
+    max_spread = getattr(cfg, 'fit_max_spread_pct', 0.50)
+    min_mid_hits = 2 if n < 100 else 3  # 稀疏时只需2/3中间ratio命中
+    RATIOS_MID = [0.382, 0.5, 0.618]
+    ANCHOR_LO, ANCHOR_HI = 0.236, 0.786
+    ANCHOR_SPAN = ANCHOR_HI - ANCHOR_LO
+    fibs = []
+    for i in range(n):
+        pl_a = arr[i]
+        for j in range(i + 1, n):
+            pl_b = arr[j]
+            spread = (pl_b - pl_a) / pl_a
+            if spread < min_spread or spread > max_spread: continue
+            leg_range = (pl_b - pl_a) / ANCHOR_SPAN
+            leg_low = pl_a - ANCHOR_LO * leg_range
+            leg_high = leg_low + leg_range
+            tol_0 = abs(leg_low) * tol_pct
+            idx = np.searchsorted(arr, leg_low)
+            hit_0 = any(0 <= k < n and abs(arr[k] - leg_low) <= tol_0 for k in [idx - 1, idx])
+            if not hit_0: continue
+            mid_hits = 0
+            for ratio in RATIOS_MID:
+                target = leg_low + leg_range * ratio
+                tol = target * tol_pct
+                idx2 = np.searchsorted(arr, target)
+                for k in [idx2 - 1, idx2]:
+                    if 0 <= k < n and abs(arr[k] - target) <= tol:
+                        mid_hits += 1; break
+            if mid_hits >= min_mid_hits:
+                fibs.append((float(leg_low), float(leg_high)))
+    log.info(f'[fit_fib_global] PL={n} tol={tol_pct:.4f} min_mid={min_mid_hits} valid_fibs={len(fibs)}')
+    return fibs
+
+
+def cluster_fibs(fibs: List[Tuple[float, float]], merge_tol: float = 0.02) -> List[dict]:
+    """将相似 Fib 聚类合并 (leg_low/high 相对差 < merge_tol)。
+    返回 [{leg_low, leg_high, consensus}] 按 consensus 降序。
+    """
+    import numpy as np
+    if not fibs: return []
+    fibs_sorted = sorted(fibs, key=lambda x: (x[0], x[1]))
+    clusters = []
+    used = [False] * len(fibs_sorted)
+    for i in range(len(fibs_sorted)):
+        if used[i]: continue
+        cl_lo = [fibs_sorted[i][0]]
+        cl_hi = [fibs_sorted[i][1]]
+        for j in range(i + 1, len(fibs_sorted)):
+            if used[j]: continue
+            avg_lo, avg_hi = np.mean(cl_lo), np.mean(cl_hi)
+            if (abs(fibs_sorted[j][0] - avg_lo) / avg_lo < merge_tol and
+                abs(fibs_sorted[j][1] - avg_hi) / avg_hi < merge_tol):
+                cl_lo.append(fibs_sorted[j][0])
+                cl_hi.append(fibs_sorted[j][1])
+                used[j] = True
+        clusters.append({"leg_low": round(np.mean(cl_lo), 2), "leg_high": round(np.mean(cl_hi), 2),
+                        "consensus": len(cl_lo)})
+        used[i] = True
+    clusters.sort(key=lambda x: -x["consensus"])
+    log.info(f'[cluster_fibs] input={len(fibs)} → clusters={len(clusters)} '
+             f'max_consensus={clusters[0]["consensus"] if clusters else 0}')
+    return clusters
+
+
+def select_fibs_by_coverage(clusters: List[dict]) -> List[dict]:
+    """按共识度优先 + 覆盖增量贪心选取, 保证全覆盖。
+    返回带 is_selected 标记的 clusters 列表。
+    """
+    import numpy as np
+    if not clusters: return []
+    all_lo = min(c["leg_low"] for c in clusters)
+    all_hi = max(c["leg_high"] for c in clusters)
+    price_lo, price_hi = int(all_lo), int(all_hi)
+    size = price_hi - price_lo + 1
+    # 可覆盖区域
+    coverable = np.zeros(size, dtype=bool)
+    for c in clusters:
+        lo_i = max(0, int(c["leg_low"]) - price_lo)
+        hi_i = min(size - 1, int(c["leg_high"]) - price_lo)
+        coverable[lo_i:hi_i + 1] = True
+    covered = np.zeros(size, dtype=bool)
+    selected_indices = []
+    # 按 consensus 降序已排好, 逐个检查覆盖增量
+    for idx, c in enumerate(clusters):
+        lo_i = max(0, int(c["leg_low"]) - price_lo)
+        hi_i = min(size - 1, int(c["leg_high"]) - price_lo)
+        new_cov = int(np.sum(~covered[lo_i:hi_i + 1] & coverable[lo_i:hi_i + 1]))
+        if new_cov > 0:
+            selected_indices.append(idx)
+            covered[lo_i:hi_i + 1] = True
+    for idx, c in enumerate(clusters):
+        c["is_selected"] = idx in selected_indices
+    n_sel = len(selected_indices)
+    log.info(f'[select_fibs_by_coverage] clusters={len(clusters)} selected={n_sel}')
+    return clusters
+
+
+def expand_ratio_lines(clusters: List[dict]) -> List[dict]:
+    """将选中的 Fib 簇展开为 ratio 线。
+    返回 [{price, ratio, fib_low, fib_high, consensus}]
+    """
+    RATIOS = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+    lines = []
+    for c in clusters:
+        if not c.get("is_selected"): continue
+        lo, hi, cons = c["leg_low"], c["leg_high"], c["consensus"]
+        span = hi - lo
+        for r in RATIOS:
+            lines.append({"price": round(lo + span * r, 2), "ratio": r,
+                         "fib_low": lo, "fib_high": hi, "consensus": cons})
+    log.info(f'[expand_ratio_lines] selected_fibs={sum(1 for c in clusters if c.get("is_selected"))} '
+             f'→ ratio_lines={len(lines)}')
+    return lines

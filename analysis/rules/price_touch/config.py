@@ -4,15 +4,10 @@ import os, tomllib, logging
 log = logging.getLogger(__name__)
 
 DEFAULTS = {
-    "proximity_k": 0.5,           # 检测半径 = center × proximity_k × 0.01 (即0.5%)
-    "min_strength": 0.3,
-    "min_fib_quality": 0.0,
-    "w_proximity": 0.4,
-    "w_line": 0.3,
-    "w_fib": 0.2,
-    "w_bidir": 0.1,
+    "proximity_k": 0.1,           # 检测半径 = price × proximity_k × 0.01 (即0.1%)
+    "w_consensus": 0.7,           # consensus 归一化权重
+    "w_proximity": 0.3,           # proximity 权重
     "scan_bars": 0,
-    "include_inferred_fib": False,
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")

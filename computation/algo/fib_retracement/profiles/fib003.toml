@@ -6,8 +6,8 @@ recent_bars = 150
 skip_recent = 15
 min_leg_span_pct = 0.05
 top_n = 4
-cluster_tolerance_pct = 0.008
-min_cluster_conf = 0.5
+cluster_tolerance_pct = 0.005
+min_cluster_conf = 0.25
 scan_bars = 20
 min_bars = 200
 # 失效参数
@@ -19,8 +19,8 @@ invalidate_stale_tol_k = 0.08
 invalidate_score_pct = 0.2
 invalidate_check_interval = 5
 # v3 新增参数
-max_price_lines = 6
-min_line_strength = 0.5
+max_price_lines = 12
+min_line_strength = 0.25
 top_lines_for_fit = 6
 max_ratio_error = 0.05
 min_fib_quality = 0.2

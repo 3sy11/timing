@@ -25,12 +25,17 @@ DEFAULTS = {
     "cluster_tolerance_pct": 0.005,
     "max_price_lines": 12,
     "min_line_strength": 0.5,
-    # Stage 4: Fib 拟合 (v3)
+    # Stage 4: Fib 拟合 (v3 legacy)
     "top_lines_for_fit": 8,
     "max_ratio_error": 0.05,
     "min_fib_quality": 0.2,
     "std_ratios": [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0],
     "min_leg_span_pct": 0.03,
+    # Stage 4b: 全局 Fib 拟合 (v5)
+    "fit_tolerance_pct": 0.003,     # 全配对拟合容差 0.3%
+    "fit_min_spread_pct": 0.02,     # 锚点最小价差 2%
+    "fit_max_spread_pct": 0.50,     # 锚点最大价差 50%
+    "cluster_merge_tol": 0.02,      # 聚类合并容差 2%
     # 窗口与生命周期
     "recent_bars": 90, "skip_recent": 10,
     "invalidate_break_bars": 3,

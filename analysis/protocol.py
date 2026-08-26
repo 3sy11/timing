@@ -53,14 +53,124 @@ class AnalysisProtocol(Protocol):
 
     def build_history_resolver(self, algo: str, compute_id: str,
                                symbol: str, interval: str) -> Callable:
-        """回测模式: 读 fib_history.parquet, 构建时间回溯 resolver(bar_ts)。
-        从 anchored FibLevel 自动重建 PriceLine (无需依赖 step3_price_lines)。
+        """回测模式: 读 lines.parquet (优先) 或 fib_history.parquet, 构建时间回溯 resolver(bar_ts)。
+        返回 resolver(bar_ts) → {mult: {price_lines, fib_levels, fib_quality, is_valid}}
         """
-        path = os.path.join(self.warehouse_path, "computation", algo,
-                            compute_id, symbol, interval, "fib_history.parquet")
-        if not os.path.isfile(path):
-            log.warning(f'[分析v3] fib_history 不存在: {path}')
-            return lambda ts: {}
+        base = os.path.join(self.warehouse_path, "computation", algo, compute_id, symbol, interval)
+        lines_path = os.path.join(base, "lines.parquet")
+        fib_path = os.path.join(base, "fib.parquet")
+        if os.path.isfile(lines_path) and os.path.isfile(fib_path):
+            return self._build_resolver_from_split(lines_path, fib_path)
+        if os.path.isfile(lines_path):
+            return self._build_resolver_from_lines(lines_path)
+        hist_path = os.path.join(base, "fib_history.parquet")
+        if os.path.isfile(hist_path):
+            return self._build_resolver_from_history(hist_path)
+        log.warning(f'[分析v3] 无数据文件: {base}')
+        return lambda ts: {}
+
+    def _build_resolver_from_split(self, lines_path: str, fib_path: str) -> Callable:
+        """从拆分的 lines.parquet + fib.parquet 构建 resolver。"""
+        with duckdb.connect() as conn:
+            det_df = conn.execute(f"SELECT * FROM read_parquet('{lines_path}') ORDER BY compute_ts, multiplier").fetchdf()
+            fib_df = conn.execute(f"SELECT * FROM read_parquet('{fib_path}') ORDER BY compute_ts, multiplier").fetchdf()
+        snapshots_by_ts = {}
+        for compute_ts, grp in det_df.groupby("compute_ts"):
+            ct = int(compute_ts)
+            by_mult = {}
+            for mult, mgrp in grp.groupby("multiplier"):
+                m = int(mult)
+                price_lines = []
+                for _, r in mgrp.iterrows():
+                    price_lines.append({
+                        "center": float(r["center"]), "tolerance": float(r["tolerance"]),
+                        "line_strength": float(r["strength"]), "hit_count": int(r["hit_count"]),
+                        "is_bidirectional": bool(r["is_bidirectional"]),
+                        "has_high": bool(r["has_high"]), "has_low": bool(r["has_low"]),
+                    })
+                by_mult[m] = {"price_lines": price_lines, "fib_levels": [], "fib_quality": 0.0, "is_valid": False}
+            snapshots_by_ts[ct] = by_mult
+        # 叠加 fib 数据
+        for compute_ts, grp in fib_df.groupby("compute_ts"):
+            ct = int(compute_ts)
+            if ct not in snapshots_by_ts:
+                snapshots_by_ts[ct] = {}
+            for mult, mgrp in grp.groupby("multiplier"):
+                m = int(mult)
+                fib_quality = float(mgrp["fib_quality"].iloc[0])
+                fib_levels = []
+                for _, r in mgrp.iterrows():
+                    delta = float(r["anchor_center"]) if pd.notna(r["anchor_center"]) else None
+                    actual_anchor = round(float(r["center"]) - delta, 2) if delta is not None else None
+                    fib_levels.append({
+                        "ratio": float(r["fib_ratio"]) if pd.notna(r["fib_ratio"]) else 0.0,
+                        "price": float(r["center"]),
+                        "is_anchored": r["type"] == "fib_anchored",
+                        "anchor_center": actual_anchor,
+                        "anchor_strength": float(r["strength"]),
+                    })
+                # fib 的 multiplier 是 rank, 挂到所有 detected mult 上
+                for dm in list(snapshots_by_ts[ct].keys()):
+                    snap = snapshots_by_ts[ct][dm]
+                    if not snap["fib_levels"] or fib_quality > snap["fib_quality"]:
+                        snap["fib_levels"] = fib_levels
+                        snap["fib_quality"] = fib_quality
+                        snap["is_valid"] = fib_quality >= 0.2
+        sorted_cts = sorted(snapshots_by_ts.keys())
+        log.info(f'[分析v3] resolver from lines+fib: {len(sorted_cts)} 快照')
+        def resolver(bar_ts: int) -> dict:
+            idx = bisect_right(sorted_cts, bar_ts) - 1
+            return snapshots_by_ts[sorted_cts[idx]] if idx >= 0 else {}
+        return resolver
+
+    def _build_resolver_from_lines(self, path: str) -> Callable:
+        """从统一 lines.parquet 构建 resolver。"""
+        with duckdb.connect() as conn:
+            df = conn.execute(f"SELECT * FROM read_parquet('{path}') ORDER BY compute_ts, multiplier").fetchdf()
+        snapshots_by_ts = {}
+        for compute_ts, grp in df.groupby("compute_ts"):
+            ct = int(compute_ts)
+            by_mult = {}
+            for mult, mgrp in grp.groupby("multiplier"):
+                m = int(mult)
+                detected = mgrp[mgrp["type"] == "detected"]
+                fib_rows = mgrp[mgrp["type"].isin(["fib_anchored", "fib_inferred", "fib_extended"])]
+                price_lines = []
+                for _, r in detected.iterrows():
+                    price_lines.append({
+                        "center": float(r["center"]), "tolerance": float(r["tolerance"]),
+                        "line_strength": float(r["strength"]), "hit_count": int(r["hit_count"]),
+                        "is_bidirectional": bool(r["is_bidirectional"]),
+                        "has_high": bool(r["has_high"]), "has_low": bool(r["has_low"]),
+                    })
+                fib_levels = []
+                fib_quality = 0.0
+                is_valid = False
+                for _, r in fib_rows.iterrows():
+                    fib_quality = float(r["fib_quality"])
+                    is_valid = fib_quality >= 0.2
+                    # anchor_center 存的是差值, 还原实际 detected center = fib_price - delta
+                    delta = float(r["anchor_center"]) if pd.notna(r["anchor_center"]) else None
+                    actual_anchor = round(float(r["center"]) - delta, 2) if delta is not None else None
+                    fib_levels.append({
+                        "ratio": float(r["fib_ratio"]) if pd.notna(r["fib_ratio"]) else 0.0,
+                        "price": float(r["center"]),
+                        "is_anchored": r["type"] == "fib_anchored",
+                        "anchor_center": actual_anchor,
+                        "anchor_strength": float(r["strength"]),
+                    })
+                by_mult[m] = {"price_lines": price_lines, "fib_levels": fib_levels,
+                             "fib_quality": fib_quality, "is_valid": is_valid}
+            snapshots_by_ts[ct] = by_mult
+        sorted_cts = sorted(snapshots_by_ts.keys())
+        log.info(f'[分析v3] resolver from lines.parquet: {len(sorted_cts)} 快照')
+        def resolver(bar_ts: int) -> dict:
+            idx = bisect_right(sorted_cts, bar_ts) - 1
+            return snapshots_by_ts[sorted_cts[idx]] if idx >= 0 else {}
+        return resolver
+
+    def _build_resolver_from_history(self, path: str) -> Callable:
+        """从旧 fib_history.parquet 构建 resolver (兼容)。"""
         with duckdb.connect() as conn:
             hist_df = conn.execute(f"SELECT * FROM read_parquet('{path}') ORDER BY compute_ts, multiplier, ratio").fetchdf()
         snapshots_by_ts = {}
@@ -74,8 +184,7 @@ class AnalysisProtocol(Protocol):
                 leg_high = float(mgrp["leg_high"].iloc[0])
                 leg_low = float(mgrp["leg_low"].iloc[0])
                 leg_range = leg_high - leg_low
-                fib_levels = []
-                price_lines = []
+                fib_levels, price_lines = [], []
                 for _, r in mgrp.iterrows():
                     fl = {"ratio": float(r["ratio"]), "price": float(r["price"]),
                           "is_anchored": bool(r["is_anchored"]),
@@ -83,27 +192,21 @@ class AnalysisProtocol(Protocol):
                           "anchor_strength": float(r["anchor_strength"])}
                     fib_levels.append(fl)
                     if fl["is_anchored"] and fl["anchor_center"] is not None:
-                        ratio = fl["ratio"]
                         price_lines.append({
                             "center": fl["anchor_center"],
                             "tolerance": leg_range * 0.005 if leg_range > 0 else 1.0,
-                            "line_strength": fl["anchor_strength"],
-                            "hit_count": 1,
+                            "line_strength": fl["anchor_strength"], "hit_count": 1,
                             "is_bidirectional": False,
-                            "has_high": ratio > 0.5,
-                            "has_low": ratio <= 0.5,
+                            "has_high": fl["ratio"] > 0.5, "has_low": fl["ratio"] <= 0.5,
                         })
                 by_mult[m] = {"price_lines": price_lines, "fib_levels": fib_levels,
                              "fib_quality": fib_quality, "is_valid": is_valid}
             snapshots_by_ts[ct] = by_mult
         sorted_cts = sorted(snapshots_by_ts.keys())
-        log.info(f'[分析v3] 构建 history resolver: {len(sorted_cts)} 个快照点, 从 anchored FibLevel 重建 PriceLine')
-
+        log.info(f'[分析v3] resolver from fib_history: {len(sorted_cts)} 快照')
         def resolver(bar_ts: int) -> dict:
             idx = bisect_right(sorted_cts, bar_ts) - 1
-            if idx < 0:
-                return {}
-            return snapshots_by_ts[sorted_cts[idx]]
+            return snapshots_by_ts[sorted_cts[idx]] if idx >= 0 else {}
         return resolver
 
     # ═══ 旧接口 (deprecated, fib_touch 兼容) ═══

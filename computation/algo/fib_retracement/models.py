@@ -1,6 +1,38 @@
 from dataclasses import dataclass, field
 from typing import List, Literal, Optional, Tuple
 
+# ═══════════════════════════════════════════════════
+#  统一 Line 数据结构 (替代 PriceLine + FibLevel + FibResult)
+# ═══════════════════════════════════════════════════
+
+LINE_TYPES = ("detected", "fib_anchored", "fib_inferred", "fib_extended")
+
+
+@dataclass
+class Line:
+    """统一的价格线: detected / fib_anchored / fib_inferred / fib_extended。"""
+    compute_ts: int = 0
+    compute_bar_idx: int = 0
+    multiplier: int = 0
+    type: str = "detected"  # detected / fib_anchored / fib_inferred / fib_extended
+    center: float = 0.0
+    # detected 专属
+    hit_count: int = 0
+    total_conf: float = 0.0
+    time_span_ratio: float = 0.0
+    has_high: bool = False
+    has_low: bool = False
+    is_bidirectional: bool = False
+    strength: float = 0.0
+    tolerance: float = 0.0
+    # fib 专属
+    fib_ratio: Optional[float] = None
+    fib_quality: float = 0.0
+    fib_leg_high: float = 0.0
+    fib_leg_low: float = 0.0
+    # 锚定引用: fib_price 与最近 detected 线的差值 (正=fib在上, 负=fib在下)
+    anchor_center: Optional[float] = None
+
 
 @dataclass
 class TrendLeg:
