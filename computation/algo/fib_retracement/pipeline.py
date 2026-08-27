@@ -9,8 +9,7 @@ import pandas as pd
 from .algo import (base_df, tag_pivots, tag_zigzag, tag_regression, compute_confidence,
                    cluster_prices, extract_trend_legs, score_and_rank,
                    adaptive_window_start, merge_legs_weighted, fit_fib_groups,
-                   fit_fib_grid_to_clusters, levels_from_hl,
-                   is_trending, fib_cluster_alignment_score)
+                   fit_fib_grid_to_clusters, levels_from_hl)
 from .config import RetracementConfig
 from .models import TrendLeg
 from ...writer import StepWriter

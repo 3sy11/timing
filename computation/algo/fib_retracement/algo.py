@@ -147,140 +147,6 @@ def cluster_prices(df: pd.DataFrame, kind: Literal["high", "low"],
 
 
 # ═══════════════════════════════════════════════════
-#  Stage 3 v2：全局价格密度图
-# ═══════════════════════════════════════════════════
-
-def build_price_density(df: pd.DataFrame, tolerance_pct: float = 0.005,
-                        min_conf: float = 0.3) -> List[DensityBand]:
-    """全局合并聚类：high 和 low 拐点一起聚类，输出密度带列表。
-    不区分 kind，支撑和压力都是「价格被市场记住的地方」。
-    tolerance 用相对值: tol = center_price × tolerance_pct（而非全局 price_range × pct）。
-    每个 band 有最小宽度 = center × tolerance_pct（保证是"带"而非"点"）。
-    """
-    n = len(df)
-    if n == 0 or "conf_high" not in df.columns:
-        return []
-    points = []
-    col_ch = df.columns.get_loc("conf_high")
-    col_cl = df.columns.get_loc("conf_low")
-    col_h = df.columns.get_loc("high")
-    col_l = df.columns.get_loc("low")
-    col_ts = df.columns.get_loc("ts")
-    for i in range(n):
-        ch, cl = float(df.iat[i, col_ch]), float(df.iat[i, col_cl])
-        ts_val = int(df.iat[i, col_ts])
-        if ch >= min_conf:
-            points.append((float(df.iat[i, col_h]), ch, i, ts_val, "high"))
-        if cl >= min_conf:
-            points.append((float(df.iat[i, col_l]), cl, i, ts_val, "low"))
-    if not points:
-        return []
-    points.sort(key=lambda x: x[0])
-    # 相邻聚类：容差用当前 center 的相对值
-    clusters: List[List] = [[points[0]]]
-    for pt in points[1:]:
-        cl = clusters[-1]
-        wsum = sum(c for _, c, _, _, _ in cl)
-        center = sum(p * c for p, c, _, _, _ in cl) / wsum
-        tol = center * tolerance_pct  # 相对容差
-        if abs(pt[0] - center) <= tol:
-            cl.append(pt)
-        else:
-            clusters.append([pt])
-    # 转换为 DensityBand
-    bands = []
-    for cl in clusters:
-        total_conf = sum(c for _, c, _, _, _ in cl)
-        center = sum(p * c for p, c, _, _, _ in cl) / total_conf
-        prices = [p for p, _, _, _, _ in cl]
-        indices = [idx for _, _, idx, _, _ in cl]
-        timestamps = [ts for _, _, _, ts, _ in cl]
-        kinds = set(k for _, _, _, _, k in cl)
-        has_high, has_low = "high" in kinds, "low" in kinds
-        is_bi = has_high and has_low
-        first_idx, last_idx = min(indices), max(indices)
-        time_span_ratio = (last_idx - first_idx) / n if n > 0 else 0.0
-        # 最小带宽 = center × tolerance_pct
-        raw_low, raw_high = min(prices), max(prices)
-        min_half_width = center * tolerance_pct * 0.5
-        band_low = min(raw_low, center - min_half_width)
-        band_high = max(raw_high, center + min_half_width)
-        band_strength = total_conf * (1.0 + time_span_ratio) * (1.5 if is_bi else 1.0)
-        bands.append(DensityBand(
-            center=round(center, 4),
-            band_low=round(band_low, 4), band_high=round(band_high, 4),
-            hit_count=len(cl), total_conf=round(total_conf, 4),
-            first_idx=first_idx, last_idx=last_idx,
-            first_ts=min(timestamps), last_ts=max(timestamps),
-            has_high=has_high, has_low=has_low, is_bidirectional=is_bi,
-            time_span_ratio=round(time_span_ratio, 4), band_strength=round(band_strength, 4)))
-    bands.sort(key=lambda b: b.band_strength, reverse=True)
-    return bands
-
-
-def inject_leg_endpoints(bands: List[DensityBand], feature_df: pd.DataFrame,
-                         cfg, tolerance_pct: float = 0.005) -> List[DensityBand]:
-    """Stage 3b: 多尺度趋势腿端点注入密度图。
-    对每个 (mult, dir) 取最优趋势腿的 high/low 端点，增强对应密度带。
-    """
-    n = len(feature_df)
-    if n < 20 or not bands:
-        return bands
-    # 先用全局密度带做聚类中心给 extract_trend_legs 用
-    all_centers = [b.center for b in bands]
-    cluster_centers_set = set(round(c, 6) for c in all_centers)
-    # 注入的端点
-    endpoints = []
-    for mult in (1, 2, 3):
-        target_bars = cfg.recent_bars * mult
-        actual_start = adaptive_window_start(feature_df, target_bars, min_conf=cfg.min_cluster_conf)
-        recent_df = feature_df.iloc[actual_start:].reset_index(drop=True)
-        if len(recent_df) < 10:
-            continue
-        # 构造简易 clusters df 给 extract_trend_legs
-        empty_df = pd.DataFrame(columns=["kind", "center", "hit_count", "total_conf", "last_index", "last_ts"])
-        legs = extract_trend_legs(recent_df, empty_df, empty_df, min_span_pct=cfg.min_leg_span_pct)
-        ranked = score_and_rank(legs, top_n=2, total_bars=len(recent_df))
-        for lg in ranked:
-            endpoints.append((lg.high, 1.5, "high", mult))
-            endpoints.append((lg.low, 1.5, "low", mult))
-    if not endpoints:
-        return bands
-    # 对每个端点，找到最近的 band 并增强；找不到则创建新 band
-    price_range = max(b.band_high for b in bands) - min(b.band_low for b in bands)
-    tol = price_range * tolerance_pct if price_range > 0 else 1.0
-    for ep_price, ep_conf, ep_kind, ep_mult in endpoints:
-        matched = None
-        best_dist = float('inf')
-        for b in bands:
-            dist = abs(ep_price - b.center)
-            if dist <= tol and dist < best_dist:
-                best_dist = dist
-                matched = b
-        if matched:
-            matched.total_conf = round(matched.total_conf + ep_conf, 4)
-            matched.hit_count += 1
-            if ep_kind == "high": matched.has_high = True
-            if ep_kind == "low": matched.has_low = True
-            matched.is_bidirectional = matched.has_high and matched.has_low
-            matched.band_strength = round(
-                matched.total_conf * (1.0 + matched.time_span_ratio) * (1.5 if matched.is_bidirectional else 1.0), 4)
-        else:
-            new_band = DensityBand(
-                center=round(ep_price, 4), band_low=round(ep_price, 4), band_high=round(ep_price, 4),
-                hit_count=1, total_conf=round(ep_conf, 4),
-                first_idx=n - 1, last_idx=n - 1, first_ts=int(feature_df.iloc[-1]["ts"]),
-                last_ts=int(feature_df.iloc[-1]["ts"]),
-                has_high=(ep_kind == "high"), has_low=(ep_kind == "low"),
-                is_bidirectional=False, time_span_ratio=0.0,
-                band_strength=round(ep_conf, 4))
-            bands.append(new_band)
-    bands.sort(key=lambda b: b.band_strength, reverse=True)
-    log.info(f'[inject_leg_endpoints] 注入 {len(endpoints)} 端点, 最终 {len(bands)} bands')
-    return bands
-
-
-# ═══════════════════════════════════════════════════
 #  第二阶段：趋势腿提取 + Fib 回撤
 # ═══════════════════════════════════════════════════
 
@@ -353,33 +219,6 @@ def score_and_rank(legs: List[TrendLeg], top_n: int = 6, total_bars: int = None)
     return result[:top_n]
 
 
-_INNER_RATIOS = [0.236, 0.382, 0.5, 0.618, 0.786]
-
-
-def fib_cluster_alignment_score(leg: TrendLeg, cluster_centers: List[float], tol_pct: float = 0.008) -> float:
-    """评估一条腿的 5 内层 Fib 线与聚类中心的对齐程度。
-    返回 [0, 5] 的分数（每条对齐的内层线贡献 0~1 分，按距离衰减）。
-    """
-    span = leg.high - leg.low
-    if span <= 0 or not cluster_centers:
-        return 0.0
-    # 计算 5 条内层线的价位
-    if leg.direction == "up":
-        inner_prices = [leg.high - span * r for r in _INNER_RATIOS]
-    else:
-        inner_prices = [leg.low + span * r for r in _INNER_RATIOS]
-    score = 0.0
-    for price in inner_prices:
-        best_dist = float('inf')
-        for c in cluster_centers:
-            dist = abs(price - c) / c if c > 0 else float('inf')
-            if dist < best_dist:
-                best_dist = dist
-        if best_dist < tol_pct:
-            score += 1.0 - (best_dist / tol_pct)  # 越近越接近1分
-    return score
-
-
 def adaptive_window_start(feature_df: pd.DataFrame, base_bars: int, min_conf: float = 0.1) -> int:
     n = len(feature_df)
     if n <= base_bars: return 0
@@ -420,48 +259,6 @@ def compute_retracement_levels(leg: TrendLeg, ratios=None) -> List[Tuple[float, 
 def fit_fib_groups(legs: List[TrendLeg], ratios=None) -> List[FibGroup]:
     ratios = ratios or [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
     return [FibGroup(leg=lg, levels=compute_retracement_levels(lg, ratios), score=lg.conf_score, direction=lg.direction) for lg in legs]
-
-
-# ═══════════════════════════════════════════════════
-#  有效性判断纯函数
-# ═══════════════════════════════════════════════════
-
-def is_trending(highs, lows, trend_min_move_pct: float) -> bool:
-    """判断序列是否处于趋势中：高低幅度 > 阈值。"""
-    if len(highs) < 2:
-        return False
-    h, l = max(highs), min(lows)
-    return (h - l) / l > trend_min_move_pct if l > 0 else False
-
-
-def is_touching(close: float, levels_json: str, leg_range: float, tol_k: float) -> bool:
-    """轻量判断: close 是否触碰该组任一有效线（0.236~0.786）。"""
-    import json as _json
-    tol = leg_range * tol_k
-    for ratio, price in _json.loads(levels_json):
-        if ratio <= 0.0 or ratio >= 1.0:
-            continue
-        if abs(close - price) <= tol:
-            return True
-    return False
-
-
-def check_invalidation(close: float, bar_idx: int, state: dict,
-                       stale_threshold: int, break_bars: int) -> str | None:
-    """检查单组 fib 失效条件。返回原因或 None。
-    state 必须含: record(dict), last_touch_bar(int), break_count(int)
-    """
-    rec = state["record"]
-    leg_high, leg_low = rec["leg_high"], rec["leg_low"]
-    if close > leg_high or close < leg_low:
-        state["break_count"] += 1
-        if state["break_count"] >= break_bars:
-            return "boundary_break"
-    else:
-        state["break_count"] = 0
-    if bar_idx - state["last_touch_bar"] >= stale_threshold:
-        return "stale"
-    return None
 
 
 # ═══════════════════════════════════════════════════
@@ -1192,19 +989,58 @@ def select_fibs_by_coverage(clusters: List[dict]) -> List[dict]:
     return clusters
 
 
+def score_clusters(clusters: List[dict], centers: List[float], min_score: float = 0.3) -> List[dict]:
+    """对每个选中的 cluster 进行打分: 其 7 条 ratio 线与实际 PL 的对齐程度。
+    score = 命中的 ratio 线数 / 7, 命中条件: 最近PL距离 < price*0.3%
+    返回带 score 字段且按 score 降序的 clusters, is_selected 根据 min_score 重新标记。
+    """
+    import numpy as np
+    arr = np.array(sorted(set(round(c, 2) for c in centers)))
+    n = len(arr)
+    RATIOS = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+    for c in clusters:
+        if not c.get("is_selected"):
+            c["score"] = 0.0; continue
+        lo, hi = c["leg_low"], c["leg_high"]
+        span = hi - lo
+        hits = 0
+        total_proximity = 0.0
+        for r in RATIOS:
+            target = lo + span * r
+            tol = target * 0.003
+            idx = np.searchsorted(arr, target)
+            best_dist = float('inf')
+            for k in [idx - 1, idx]:
+                if 0 <= k < n:
+                    best_dist = min(best_dist, abs(arr[k] - target))
+            if best_dist <= tol:
+                hits += 1
+                total_proximity += 1.0 - best_dist / tol
+        c["score"] = round(hits / 7.0 * 0.5 + total_proximity / 7.0 * 0.5, 4)
+    # 重新标记 is_selected
+    for c in clusters:
+        c["is_selected"] = c.get("score", 0) >= min_score
+    clusters.sort(key=lambda x: -x.get("score", 0))
+    n_sel = sum(1 for c in clusters if c["is_selected"])
+    log.info(f'[score_clusters] total={len(clusters)} scored, selected(>={min_score})={n_sel} '
+             f'top_score={clusters[0]["score"] if clusters else 0}')
+    return clusters
+
+
 def expand_ratio_lines(clusters: List[dict]) -> List[dict]:
     """将选中的 Fib 簇展开为 ratio 线。
-    返回 [{price, ratio, fib_low, fib_high, consensus}]
+    返回 [{price, ratio, fib_low, fib_high, consensus, score}]
     """
     RATIOS = [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
     lines = []
     for c in clusters:
         if not c.get("is_selected"): continue
         lo, hi, cons = c["leg_low"], c["leg_high"], c["consensus"]
+        score = c.get("score", 0)
         span = hi - lo
         for r in RATIOS:
             lines.append({"price": round(lo + span * r, 2), "ratio": r,
-                         "fib_low": lo, "fib_high": hi, "consensus": cons})
+                         "fib_low": lo, "fib_high": hi, "consensus": cons, "score": score})
     log.info(f'[expand_ratio_lines] selected_fibs={sum(1 for c in clusters if c.get("is_selected"))} '
              f'→ ratio_lines={len(lines)}')
     return lines

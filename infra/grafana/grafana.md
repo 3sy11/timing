@@ -11,11 +11,13 @@
 | 镜像 | `grafana/grafana:13.1.0-ubuntu` |
 | 数据源 | `TimingDuckDB`（`motherduck-duckdb-datasource`） |
 | 仓库挂载 | `warehouse/timing` → 容器内 `/warehouse/timing` |
-| 元数据库 | `warehouse/timing/grafana.db` |
+| 元数据库 | `warehouse/timing/grafana.db`（唯一真源，dashboard / datasource 都写这里） |
 
-启动：`cd timing/infra && podman compose up -d`（需先 `podman machine start`）。
+启动：`cd timing/infra && docker compose up -d`。
 
 插件安装：`infra/setup-plugin.sh`（DuckDB 插件固定 **v0.4.5**）。
+
+说明：当前已**完全移除 provisioning 挂载**，看板和数据源只通过 Grafana API 写入 `grafana.db`，不要再往 `infra/grafana/provisioning` 里放可用配置。
 
 ---
 
@@ -234,18 +236,18 @@ ORDER BY ts ASC
 
 ---
 
-## 8. Grafana 13 Unified Storage
+## 8. Grafana 13 数据库管理
 
-升级到 Grafana 13 后，Dashboard 存在 **Unified Storage**（`resource` 表），旧库 `dashboard` 表中的看板可能 **列表搜不到 / API search 为 0**。
+升级到 Grafana 13 后，Dashboard / Datasource 实际都写进 **Unified Storage**（`resource` 表）和相关系统表里，`dashboard` 旧表基本不再是事实来源。
 
 安全重建步骤：
 
-1. 从旧库或 API 导出 Dashboard JSON  
+1. 先备份 `grafana.db` 和当前 dashboard JSON（建议放 `tmp/grafana-backup-...`）  
 2. 停 Grafana，删除/重建 `grafana.db`（或换新 `GF_DATABASE_PATH`）  
-3. 启动后 provisioning 数据源/插件  
-4. `POST /api/dashboards/db` 重新导入  
+3. 启动 Grafana，先用 `POST /api/datasources` 重建 `TimingDuckDB`  
+4. 再用 `POST /api/dashboards/db` 重新导入看板
 
-不要依赖「关掉 unified storage」降级；以 API 重导入为准。
+不要依赖 file-based provisioning；本项目改成 **DB + API** 管理。
 
 ---
 
@@ -263,6 +265,21 @@ requests.post("http://localhost:3000/api/dashboards/db", auth=auth, json={"dashb
 ```
 
 注意：`PUT` 可能返回 Not found，用 `POST /api/dashboards/db` + `overwrite: true`。
+
+datasource 也建议走 API 管理，先查询现有记录，再按需重建：
+
+```python
+import requests
+auth = ("admin", "timing")
+requests.post("http://localhost:3000/api/datasources", auth=auth, json={
+    "name": "TimingDuckDB",
+    "type": "motherduck-duckdb-datasource",
+    "access": "proxy",
+    "isDefault": True,
+    "editable": True,
+    "jsonData": {"path": ":memory:"},
+})
+```
 
 ---
 
@@ -320,7 +337,21 @@ ORDER BY ts ASC
 3. **查询报 unsorted by time**：改 `ORDER BY ... ASC`。  
 4. **format 字符串报错**：改用整数 `0/1/2`。  
 5. **Annotation 竖线太乱**：`lines.width=0`、`regions.opacity=0`。  
-6. **升级后看板消失**：Unified Storage，导出后重建 DB 再导入。  
-7. **Podman 连不上**：`podman machine start`，必要时设置正确 API socket。  
-8. **面板 Datasource not found / 持仓表无数据**：检查面板 datasource `uid` 是否等于 `TimingDuckDB` 的真实 uid（当前 `PF6BE4C1702A928CD`）。写错 uid（如残留假 uid）时 Grafana 返回 404，面板表现为 No data。  
-9. **品种下拉没有某个标的**：对应 `compute_id` 目录下是否缺少 `manifest.json`（仅有 `result.parquet` 不够）。  
+6. **升级后看板消失**：统一走 DB+API 重建，不要再找 provisioning。
+7. **看板和数据源莫名恢复/消失**：检查是否还有旧的 file provisioning 挂载残留。
+8. **面板 Datasource not found / 持仓表无数据**：检查面板 datasource `uid` 是否等于 `TimingDuckDB` 的真实 uid（当前 `PF6BE4C1702A928CD`）。写错 uid（如残留假 uid）时 Grafana 返回 404，面板表现为 No data。
+9. **品种下拉没有某个标的**：对应 `compute_id` 目录下是否缺少 `manifest.json`（仅有 `result.parquet` 不够）。
+
+---
+
+## 12. Grafana 13 timeseries 隐藏 legend 空白 Bug
+
+已复现：在 Grafana `13.1.0` 的 timeseries 面板里，如果把 `options.legend.displayMode` 设成 `hidden`，面板可能会出现“编辑时临时能看到，刷新后又空白，而且不提示 No data”的情况。这个症状和 [`#125963`](https://github.com/grafana/grafana/issues/125963) 很接近，属于前端渲染问题，不是 SQL 直接报错。
+
+当前可用的规避方式：
+
+- `legend.displayMode` 改成 `list`
+- `showLegend: true`
+- 取数风格尽量贴近已知可工作的面板，例如 `epoch_ms(ts)::DATE AS time` + `format: 0`
+
+如果再碰到“编辑后看得到、刷新后消失”，优先先看这个 legend 配置，再看 datasource UID 和 SQL 返回 frames 是否正常。

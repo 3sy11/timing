@@ -21,21 +21,12 @@ DEFAULTS = {
     "weights": {"pivot_5": 0.5, "pivot_8": 1.0, "zigzag_5": 0.5, "zigzag_10": 1.0, "reg_50": 0.5, "reg_100": 1.0},
     # Stage 2: 置信度
     "min_cluster_conf": 0.3,
-    # Stage 3: 价格线聚合 (v3)
+    # Stage 3/4: 聚类 + Fib 网格
     "cluster_tolerance_pct": 0.005,
     "max_price_lines": 12,
     "min_line_strength": 0.5,
-    # Stage 4: Fib 拟合 (v3 legacy)
-    "top_lines_for_fit": 8,
-    "max_ratio_error": 0.05,
-    "min_fib_quality": 0.2,
     "std_ratios": [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0],
     "min_leg_span_pct": 0.03,
-    # Stage 4b: 全局 Fib 拟合 (v5)
-    "fit_tolerance_pct": 0.003,     # 全配对拟合容差 0.3%
-    "fit_min_spread_pct": 0.02,     # 锚点最小价差 2%
-    "fit_max_spread_pct": 0.50,     # 锚点最大价差 50%
-    "cluster_merge_tol": 0.02,      # 聚类合并容差 2%
     # 窗口与生命周期
     "recent_bars": 90, "skip_recent": 10,
     "invalidate_break_bars": 3,
@@ -44,7 +35,7 @@ DEFAULTS = {
     "recalc_interval": 20,
     # 兼容旧参数
     "top_n": 6, "scan_bars": 0, "min_bars": 200,
-    "trend_min_move_pct": 0.10, "min_fit_score": 1.0,
+    "min_fit_score": 1.0,
     "vacancy_retry_interval": 5,
     "touch_tolerance": 0.5, "touch_cooldown_sec": 60.0,
     "breakout_tolerance": 1.0, "cooldown_bars": 5,
