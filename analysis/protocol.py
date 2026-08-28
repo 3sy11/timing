@@ -219,8 +219,8 @@ class AnalysisProtocol(Protocol):
             return [], {}, {}
         with duckdb.connect() as conn:
             rows = conn.execute(
-                f"SELECT effective_ts, multiplier, direction, fib_quality as score, "
-                f"effective_ts as leg_start_ts, effective_ts as leg_end_ts, "
+                f"SELECT effective_ts, multiplier, direction, score, "
+                f"leg_start_ts, leg_end_ts, "
                 f"leg_low, leg_high, levels_json, invalidated_ts, invalidate_reason "
                 f"FROM read_parquet('{path}') ORDER BY effective_ts, multiplier"
             ).fetchall()

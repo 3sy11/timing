@@ -8,18 +8,12 @@ min_leg_span_pct = 0.02
 top_n = 8
 cluster_tolerance_pct = 0.003
 min_cluster_conf = 0.2
-scan_bars = 20
 min_bars = 200
-# 质量与失效
-min_fit_score = 0.1
-invalidate_break_bars = 3
+# Fib 拟合质量门槛（越高越严格，典型 score 范围 0.5~3.5）
+min_fit_score = 1.2
+# 失效：连续超出边界 bar 数（越大越宽容）
+invalidate_break_bars = 5
+# 边界容忍：close 超出 leg 范围的倍率缓冲 (leg_span * tolerance_k)
+boundary_tolerance_k = 0.05
+# 空置槽位重试间隔
 vacancy_retry_interval = 5
-# v3 新增参数
-max_price_lines = 10
-min_line_strength = 0.3
-top_lines_for_fit = 8
-max_ratio_error = 0.05
-min_fib_quality = 0.2
-band_decay_factor = 0.7
-band_decay_n = 0.25
-recalc_interval = 15

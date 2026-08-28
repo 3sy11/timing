@@ -355,3 +355,52 @@ ORDER BY ts ASC
 - 取数风格尽量贴近已知可工作的面板，例如 `epoch_ms(ts)::DATE AS time` + `format: 0`
 
 如果再碰到“编辑后看得到、刷新后消失”，优先先看这个 legend 配置，再看 datasource UID 和 SQL 返回 frames 是否正常。
+
+---
+
+## 13. Fib v3 看板的插件处理记录
+
+这部分是本次 Fib v3 重做时的固定做法，后面重建同类图直接照着走。
+
+### 13.1 三层 Query 结构
+
+同一张 timeseries 图建议拆成 3 个 Query：
+
+- `Query A`：K 线，单独取 `open/high/low/close`
+- `Query B`：当前有效期内的 Fib 7 条线，按有效起止时间画实线
+- `Query C`：同一批 Fib 线再取一遍，改成贯穿整个时间轴的虚线，用来观察延伸后是否仍然有效
+
+### 13.2 线不显示时先这样查
+
+- 先确认 Query 是 timeseries 结果，不是 Table
+- 线查询必须输出 `time + value + metric` 这类时序字段
+- 每条线至少给两个时间点：起点和终点；如果只返回一个点，面板上看起来就像没画出来
+- `ORDER BY time ASC`，不要倒序
+
+### 13.3 虚线覆盖层的做法
+
+如果要让 Fib 线贯穿整个可视区，不要直接拿 `${__from}` / `${__to}` 当唯一边界，推荐先从 K 线表里算出 `min(ts)` / `max(ts)` 再作为虚线起止点。
+
+推荐样式：
+
+- 颜色：蓝色 `#5794F2`
+- 线宽：`1`
+- 线型：点线 / 虚线
+
+这样虚线覆盖在实线上时，仍然比较容易区分。
+
+### 13.4 取最新 / 倒数第 N 个有效 Fib
+
+按 `step3_fib_groups.parquet` 取当前有效组时，统一用：
+
+```sql
+ROW_NUMBER() OVER (ORDER BY effective_ts DESC)
+```
+
+再按 `rn = 1 / 2 / 3` 选最新、倒数第二、倒数第三组。这样和 result.parquet 里的 price line 保持同一条 fib 组来源。
+
+### 13.5 最后怎么维护
+
+- Grafana 看板只通过 `/api/dashboards/db` 更新，不依赖 provisioning
+- Datasource UID 以 `TimingDuckDB` 当前真实 UID 为准
+- 面板空白时，先查 legend，再查 SQL，再查 datasource UID

@@ -21,29 +21,38 @@ DEFAULTS = {
     "weights": {"pivot_5": 0.5, "pivot_8": 1.0, "zigzag_5": 0.5, "zigzag_10": 1.0, "reg_50": 0.5, "reg_100": 1.0},
     # Stage 2: 置信度
     "min_cluster_conf": 0.3,
-    # Stage 3/4: 聚类 + Fib 网格
+    # Stage 3: 聚类 + Fib 网格拟合
     "cluster_tolerance_pct": 0.005,
-    "max_price_lines": 12,
-    "min_line_strength": 0.5,
     "std_ratios": [0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0],
     "min_leg_span_pct": 0.03,
+    "min_fit_score": 1.5,
     # 窗口与生命周期
-    "recent_bars": 90, "skip_recent": 10,
-    "invalidate_break_bars": 3,
-    "band_decay_factor": 0.7,
-    "band_decay_n": 0.20,
-    "recalc_interval": 20,
-    # 兼容旧参数
-    "top_n": 6, "scan_bars": 0, "min_bars": 200,
-    "min_fit_score": 1.0,
+    "recent_bars": 90,
+    "skip_recent": 10,
+    "invalidate_break_bars": 5,
+    "boundary_tolerance_k": 0.05,
     "vacancy_retry_interval": 5,
-    "touch_tolerance": 0.5, "touch_cooldown_sec": 60.0,
-    "breakout_tolerance": 1.0, "cooldown_bars": 5,
-    "approach_lookback": 5, "history_lookback_bars": 200,
-    "volume_lookback": 20, "volume_threshold": 1.5,
-    "w_consensus": 2.0, "w_bounce_rate": 1.5, "w_touch_count": 0.1,
-    "w_volume": 1.0, "w_counter_trend": 0.5, "w_candle": 1.0,
-    "strong_threshold": 5.0, "medium_threshold": 3.5, "weak_threshold": 2.0,
+    # 兼容旧参数（分析层使用）
+    "top_n": 6,
+    "min_bars": 200,
+    "scan_bars": 0,
+    "touch_tolerance": 0.5,
+    "touch_cooldown_sec": 60.0,
+    "breakout_tolerance": 1.0,
+    "cooldown_bars": 5,
+    "approach_lookback": 5,
+    "history_lookback_bars": 200,
+    "volume_lookback": 20,
+    "volume_threshold": 1.5,
+    "w_consensus": 2.0,
+    "w_bounce_rate": 1.5,
+    "w_touch_count": 0.1,
+    "w_volume": 1.0,
+    "w_counter_trend": 0.5,
+    "w_candle": 1.0,
+    "strong_threshold": 5.0,
+    "medium_threshold": 3.5,
+    "weak_threshold": 2.0,
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")
@@ -73,7 +82,6 @@ def parse_overrides(overrides: list[str] | None) -> dict:
         key, val_str = item.split("=", 1)
         key = key.strip()
         val_str = val_str.strip()
-        # 尝试转换类型
         try:
             import json
             result[key] = json.loads(val_str)

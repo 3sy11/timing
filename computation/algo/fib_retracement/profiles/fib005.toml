@@ -8,14 +8,10 @@ min_leg_span_pct = 0.05
 top_n = 4
 cluster_tolerance_pct = 0.008
 min_cluster_conf = 0.2
-scan_bars = 20
 min_bars = 200
-# v3 新增参数
-max_price_lines = 10
-min_line_strength = 0.25
-top_lines_for_fit = 5
-max_ratio_error = 0.05
-min_fib_quality = 0.3
-band_decay_factor = 0.7
-band_decay_n = 0.15
-recalc_interval = 30
+# Fib 拟合质量门槛
+min_fit_score = 1.8
+# 失效
+invalidate_break_bars = 6
+boundary_tolerance_k = 0.10
+vacancy_retry_interval = 8
