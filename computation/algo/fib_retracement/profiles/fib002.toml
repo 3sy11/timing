@@ -1,28 +1,22 @@
-# fib002 — 中期平衡：标准参数基线
+# fib002 — 中短期均衡：介于 fib001(短期敏感) 和 fib003(长期稳健) 之间
 pivot_windows = [[5, 5], [8, 8]]
 zigzag_thresholds = [0.05, 0.10]
 regression_windows = [50, 100]
-recent_bars = 90
+recent_bars = 60
 skip_recent = 10
 min_leg_span_pct = 0.03
-top_n = 6
-cluster_tolerance_pct = 0.005
-min_cluster_conf = 0.3
-scan_bars = 20
+top_n = 4
+cluster_tolerance_pct = 0.004
+min_cluster_conf = 0.22
 min_bars = 200
-# 失效参数
-min_fit_score = 0.1
-invalidate_break_bars = 2
-invalidate_stale_ratio = 0.2
-invalidate_stale_tol_k = 0.08
-invalidate_score_pct = 0.2
-invalidate_check_interval = 5
-# v3 新增参数
-max_price_lines = 8
-min_line_strength = 0.5
-top_lines_for_fit = 8
-max_ratio_error = 0.05
-min_fib_quality = 0.2
-band_decay_factor = 0.7
-band_decay_n = 0.20
-recalc_interval = 20
+# Fib 拟合质量门槛
+min_fit_score = 1.5
+# 失效
+invalidate_break_bars = 5
+boundary_tolerance_k = 0.02
+vacancy_retry_interval = 5
+# stale/coverage 失效
+stale_lookback = 25
+stale_touch_tol_k = 0.05
+stale_min_coverage = 0.4
+stale_check_interval = 10

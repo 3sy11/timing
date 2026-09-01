@@ -14,6 +14,11 @@ min_fit_score = 1.2
 # 失效：连续超出边界 bar 数（越大越宽容）
 invalidate_break_bars = 5
 # 边界容忍：close 超出 leg 范围的倍率缓冲 (leg_span * tolerance_k)
-boundary_tolerance_k = 0.05
+boundary_tolerance_k = 0.02
 # 空置槽位重试间隔
 vacancy_retry_interval = 5
+# stale/coverage 失效
+stale_lookback = 25
+stale_touch_tol_k = 0.05
+stale_min_coverage = 0.4
+stale_check_interval = 10

@@ -129,13 +129,21 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
     break_bars = cfg.invalidate_break_bars
     boundary_tol_k = cfg.get("boundary_tolerance_k", 0.05)
     vacancy_interval = cfg.get("vacancy_retry_interval", 5)
+    # stale/coverage 参数
+    stale_lookback = cfg.get("stale_lookback", 30)
+    stale_touch_tol_k = cfg.get("stale_touch_tol_k", 0.06)
+    stale_min_coverage = cfg.get("stale_min_coverage", 0.4)
+    stale_check_interval = cfg.get("stale_check_interval", 10)
+    _INNER_RATIOS = [0.236, 0.382, 0.5, 0.618, 0.786]
 
     ALL_KEYS = [(m, d) for m in (1, 2, 3) for d in ("up", "down")]
     MAX_ACTIVE = 3
-    VACANCY_INTERVAL = max(vacancy_interval, 20)  # 防止过于频繁
+    VACANCY_INTERVAL = max(vacancy_interval, 20)
 
     active_slots: dict[tuple, list] = {key: [] for key in ALL_KEYS}
     break_counts_slots: dict[tuple, list] = {key: [] for key in ALL_KEYS}
+    stale_counters: dict[tuple, list] = {key: [] for key in ALL_KEYS}
+    creation_bis: dict[tuple, list] = {key: [] for key in ALL_KEYS}  # 记录每个 slot 的创建 bar index
     vacancy_counters: dict[tuple, int] = {key: 0 for key in ALL_KEYS}
 
     def _no_duplicate(new_rec, existing_list):
@@ -149,10 +157,35 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
                 return False
         return True
 
+    def _fib_inner_prices(rec):
+        """提取组的 5 条内层 Fib 线价位"""
+        levels = json.loads(rec["levels_json"]) if isinstance(rec["levels_json"], str) else rec["levels_json"]
+        return [price for ratio, price in levels if 0.001 < ratio < 0.999]
+
+    def _check_coverage(rec, bi_now, creation_bi):
+        """计算最近 stale_lookback 根 bar 的内层线覆盖率（不回溯到组创建之前）"""
+        inner_prices = _fib_inner_prices(rec)
+        if not inner_prices:
+            return 1.0
+        span = rec["leg_high"] - rec["leg_low"]
+        tol = span * stale_touch_tol_k
+        earliest = max(creation_bi, bi_now - stale_lookback + 1)
+        if earliest > bi_now:
+            return 1.0
+        touched = set()
+        for b in range(earliest, bi_now + 1):
+            c = closes[b]
+            for idx, p in enumerate(inner_prices):
+                if abs(c - p) <= tol:
+                    touched.add(idx)
+        return len(touched) / len(inner_prices)
+
     def _try_fill_slots(key, bi, source, parent_ts=None):
         """尝试在 key 的槽位中填入新的组，直到 MAX_ACTIVE"""
         slots = active_slots[key]
         bc = break_counts_slots[key]
+        sc = stale_counters[key]
+        cb = creation_bis[key]
         if len(slots) >= MAX_ACTIVE:
             return
         recs = _compute_fib_at(feature_df, bi, cfg, target_keys={key})
@@ -165,6 +198,8 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
             r["parent_eff_ts"] = parent_ts
             slots.append(r)
             bc.append(0)
+            sc.append(0)
+            cb.append(bi)
             if len(slots) >= MAX_ACTIVE:
                 break
 
@@ -181,24 +216,41 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
         for key in ALL_KEYS:
             slots = active_slots[key]
             bc = break_counts_slots[key]
+            sc = stale_counters[key]
+            cb = creation_bis[key]
             to_remove = []
             for si in range(len(slots)):
                 rec = slots[si]
                 span = rec["leg_high"] - rec["leg_low"]
                 buffer = span * boundary_tol_k
+                # 1) boundary_break: 最近 break_bars 根中超出次数 >= break_bars（不要求严格连续）
                 if close > rec["leg_high"] + buffer or close < rec["leg_low"] - buffer:
                     bc[si] += 1
-                    if bc[si] >= break_bars:
+                else:
+                    bc[si] = max(0, bc[si] - 1)  # 渐退衰减而非立即归零
+                if bc[si] >= break_bars:
+                    rec["invalidated_ts"] = int(ts_list[bi])
+                    rec["invalidate_reason"] = "boundary_break"
+                    all_records.append(rec)
+                    invalidation_count += 1
+                    to_remove.append(si)
+                    continue
+                # 2) stale/low_coverage 检测（每 stale_check_interval bar 检查一次）
+                sc[si] += 1
+                if sc[si] >= stale_check_interval:
+                    sc[si] = 0
+                    coverage = _check_coverage(rec, bi, cb[si])
+                    if coverage <= stale_min_coverage:
                         rec["invalidated_ts"] = int(ts_list[bi])
-                        rec["invalidate_reason"] = "boundary_break"
+                        rec["invalidate_reason"] = f"low_coverage({coverage:.2f})"
                         all_records.append(rec)
                         invalidation_count += 1
                         to_remove.append(si)
-                else:
-                    bc[si] = 0
             for si in sorted(to_remove, reverse=True):
                 slots.pop(si)
                 bc.pop(si)
+                sc.pop(si)
+                cb.pop(si)
             # 有失效则立即尝试填充
             if to_remove and len(slots) < MAX_ACTIVE:
                 parent = all_records[-1]["effective_ts"] if all_records else None
@@ -210,9 +262,41 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
                     vacancy_counters[key] = 0
                     _try_fill_slots(key, bi, "vacancy_fill")
 
+    # 最终检查：对所有仍活跃的组做一次 coverage + boundary 检查（用全数据，不受 skip_recent 限制）
+    final_bi = n - 1
     for key in ALL_KEYS:
-        for rec in active_slots[key]:
+        slots = active_slots[key]
+        cb = creation_bis[key]
+        final_remove = []
+        for si in range(len(slots)):
+            rec = slots[si]
+            span = rec["leg_high"] - rec["leg_low"]
+            # final boundary check: 最近 break_bars 根是否连续超出
+            exceed = 0
+            for b in range(max(end_pos, final_bi - break_bars + 1), final_bi + 1):
+                buffer = span * boundary_tol_k
+                c = closes[b]
+                if c > rec["leg_high"] + buffer or c < rec["leg_low"] - buffer:
+                    exceed += 1
+            if exceed >= break_bars:
+                rec["invalidated_ts"] = int(ts_list[final_bi])
+                rec["invalidate_reason"] = "boundary_break(final)"
+                all_records.append(rec)
+                invalidation_count += 1
+                final_remove.append(si)
+                continue
+            # final coverage check
+            coverage = _check_coverage(rec, final_bi, cb[si])
+            if coverage <= stale_min_coverage:
+                rec["invalidated_ts"] = int(ts_list[final_bi])
+                rec["invalidate_reason"] = f"low_coverage_final({coverage:.2f})"
+                all_records.append(rec)
+                invalidation_count += 1
+                final_remove.append(si)
+                continue
             all_records.append(rec)
+        for si in sorted(final_remove, reverse=True):
+            slots.pop(si)
 
     # 写 step3: fib 组表 (中间产物)
     step3_cols = ["effective_ts", "multiplier", "direction", "score", "leg_start_ts", "leg_end_ts",

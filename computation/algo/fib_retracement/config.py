@@ -30,8 +30,13 @@ DEFAULTS = {
     "recent_bars": 90,
     "skip_recent": 10,
     "invalidate_break_bars": 5,
-    "boundary_tolerance_k": 0.05,
+    "boundary_tolerance_k": 0.02,
     "vacancy_retry_interval": 5,
+    # stale/coverage 失效
+    "stale_lookback": 30,
+    "stale_touch_tol_k": 0.06,
+    "stale_min_coverage": 0.4,
+    "stale_check_interval": 10,
     # 兼容旧参数（分析层使用）
     "top_n": 6,
     "min_bars": 200,

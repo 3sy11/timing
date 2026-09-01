@@ -13,5 +13,10 @@ min_bars = 200
 min_fit_score = 1.8
 # 失效
 invalidate_break_bars = 6
-boundary_tolerance_k = 0.10
+boundary_tolerance_k = 0.04
 vacancy_retry_interval = 8
+# stale/coverage 失效
+stale_lookback = 50
+stale_touch_tol_k = 0.08
+stale_min_coverage = 0.4
+stale_check_interval = 20
