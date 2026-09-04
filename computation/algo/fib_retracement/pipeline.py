@@ -40,6 +40,7 @@ def _compute_fib_at(feature_df, end_idx: int, cfg,
         centers.sort(key=lambda x: x[0])
         if len(centers) < 3:
             continue
+        centers_json = json.dumps([[round(p, 2), round(c, 4)] for p, c in centers])
         for direction in ("up", "down"):
             if target_keys and (mult, direction) not in target_keys:
                 continue
@@ -59,6 +60,7 @@ def _compute_fib_at(feature_df, end_idx: int, cfg,
                                "leg_start_ts": leg_start_ts, "leg_end_ts": leg_end_ts,
                                "leg_low": l, "leg_high": h,
                                "levels_json": json.dumps(levels),
+                               "cluster_centers_json": centers_json,
                                "invalidated_ts": None, "invalidate_reason": None})
     return records
 
@@ -300,7 +302,8 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
 
     # 写 step3: fib 组表 (中间产物)
     step3_cols = ["effective_ts", "multiplier", "direction", "score", "leg_start_ts", "leg_end_ts",
-                  "leg_low", "leg_high", "levels_json", "invalidated_ts", "invalidate_reason",
+                  "leg_low", "leg_high", "levels_json", "cluster_centers_json",
+                  "invalidated_ts", "invalidate_reason",
                   "source", "parent_eff_ts"]
     step3_df = pd.DataFrame(all_records, columns=step3_cols) if all_records else pd.DataFrame(columns=step3_cols)
     writer.write_step("step3_fib_groups", step3_df)

@@ -1,22 +1,19 @@
-# fib005 — 超长周期：大窗口+大回溯，识别大级别回撤
-pivot_windows = [[13, 13], [21, 21]]
-zigzag_thresholds = [0.10, 0.20]
-regression_windows = [100, 200]
-recent_bars = 200
-skip_recent = 20
-min_leg_span_pct = 0.05
-top_n = 4
-cluster_tolerance_pct = 0.008
-min_cluster_conf = 0.2
+# fib005 — 长期：recent_bars=100
+pivot_windows = [[5, 5], [8, 8], [13, 13]]
+zigzag_thresholds = [0.05, 0.08, 0.12]
+regression_windows = [50, 70, 120]
+recent_bars = 100
+skip_recent = 10
+min_leg_span_pct = 0.03
+top_n = 5
+cluster_tolerance_pct = 0.006
+min_cluster_conf = 0.22
 min_bars = 200
-# Fib 拟合质量门槛
-min_fit_score = 1.8
-# 失效
+min_fit_score = 1.0
 invalidate_break_bars = 6
-boundary_tolerance_k = 0.04
-vacancy_retry_interval = 8
-# stale/coverage 失效
-stale_lookback = 50
-stale_touch_tol_k = 0.08
-stale_min_coverage = 0.4
-stale_check_interval = 20
+boundary_tolerance_k = 0.05
+vacancy_retry_interval = 5
+stale_lookback = 40
+stale_touch_tol_k = 0.06
+stale_min_coverage = 0.25
+stale_check_interval = 12

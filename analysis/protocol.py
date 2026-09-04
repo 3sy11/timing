@@ -213,8 +213,12 @@ class AnalysisProtocol(Protocol):
 
     def read_structures_timeseries(self, algo: str, compute_id: str,
                                    symbol: str, interval: str):
-        path = os.path.join(self.warehouse_path, "computation", algo,
-                            compute_id, symbol, interval, "result.parquet")
+        # 优先读 step3_fib_groups.parquet（含 levels_json + score），fallback 到 result.parquet
+        base = os.path.join(self.warehouse_path, "computation", algo,
+                            compute_id, symbol, interval)
+        step3_path = os.path.join(base, "step3_fib_groups.parquet")
+        result_path = os.path.join(base, "result.parquet")
+        path = step3_path if os.path.isfile(step3_path) else result_path
         if not os.path.isfile(path):
             return [], {}, {}
         with duckdb.connect() as conn:

@@ -1,22 +1,19 @@
-# fib003 — 长期稳健：大窗口+高阈值，只保留显著趋势
-pivot_windows = [[8, 8], [13, 13]]
-zigzag_thresholds = [0.08, 0.15]
-regression_windows = [80, 150]
-recent_bars = 150
-skip_recent = 15
-min_leg_span_pct = 0.05
-top_n = 4
-cluster_tolerance_pct = 0.005
-min_cluster_conf = 0.25
+# fib003 — 中期：recent_bars=90
+pivot_windows = [[5, 5], [8, 8], [13, 13]]
+zigzag_thresholds = [0.05, 0.08, 0.12]
+regression_windows = [50, 70, 120]
+recent_bars = 90
+skip_recent = 9
+min_leg_span_pct = 0.03
+top_n = 5
+cluster_tolerance_pct = 0.006
+min_cluster_conf = 0.22
 min_bars = 200
-# Fib 拟合质量门槛
-min_fit_score = 1.5
-# 失效
-invalidate_break_bars = 5
-boundary_tolerance_k = 0.03
+min_fit_score = 1.0
+invalidate_break_bars = 6
+boundary_tolerance_k = 0.05
 vacancy_retry_interval = 5
-# stale/coverage 失效
-stale_lookback = 40
+stale_lookback = 35
 stale_touch_tol_k = 0.06
-stale_min_coverage = 0.4
-stale_check_interval = 15
+stale_min_coverage = 0.25
+stale_check_interval = 11

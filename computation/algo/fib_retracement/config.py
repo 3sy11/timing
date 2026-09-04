@@ -18,7 +18,9 @@ DEFAULTS = {
     "pivot_windows": [[5, 5], [8, 8]],
     "zigzag_thresholds": [0.05, 0.10],
     "regression_windows": [50, 100],
-    "weights": {"pivot_5": 0.5, "pivot_8": 1.0, "zigzag_5": 0.5, "zigzag_10": 1.0, "reg_50": 0.5, "reg_100": 1.0},
+    "weights": {"pivot_5": 0.5, "pivot_8": 1.0, "pivot_13": 1.5,
+                 "zigzag_5": 0.5, "zigzag_8": 1.0, "zigzag_10": 1.0, "zigzag_12": 1.5,
+                 "reg_50": 0.5, "reg_70": 1.0, "reg_100": 1.0, "reg_120": 1.5},
     # Stage 2: 置信度
     "min_cluster_conf": 0.3,
     # Stage 3: 聚类 + Fib 网格拟合

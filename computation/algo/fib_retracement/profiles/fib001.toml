@@ -1,24 +1,19 @@
-# fib001 — 短期敏感：小窗口+低阈值，捕捉短期波动
-pivot_windows = [[3, 3], [5, 5]]
-zigzag_thresholds = [0.03, 0.05]
-regression_windows = [30, 60]
-recent_bars = 60
-skip_recent = 5
-min_leg_span_pct = 0.02
-top_n = 8
-cluster_tolerance_pct = 0.003
-min_cluster_conf = 0.2
+# fib001 — 极短期：recent_bars=80
+pivot_windows = [[5, 5], [8, 8], [13, 13]]
+zigzag_thresholds = [0.05, 0.08, 0.12]
+regression_windows = [50, 70, 120]
+recent_bars = 80
+skip_recent = 8
+min_leg_span_pct = 0.03
+top_n = 5
+cluster_tolerance_pct = 0.006
+min_cluster_conf = 0.22
 min_bars = 200
-# Fib 拟合质量门槛（越高越严格，典型 score 范围 0.5~3.5）
-min_fit_score = 1.2
-# 失效：连续超出边界 bar 数（越大越宽容）
-invalidate_break_bars = 5
-# 边界容忍：close 超出 leg 范围的倍率缓冲 (leg_span * tolerance_k)
-boundary_tolerance_k = 0.02
-# 空置槽位重试间隔
+min_fit_score = 1.0
+invalidate_break_bars = 6
+boundary_tolerance_k = 0.05
 vacancy_retry_interval = 5
-# stale/coverage 失效
-stale_lookback = 25
-stale_touch_tol_k = 0.05
-stale_min_coverage = 0.4
+stale_lookback = 30
+stale_touch_tol_k = 0.06
+stale_min_coverage = 0.25
 stale_check_interval = 10
