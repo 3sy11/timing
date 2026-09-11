@@ -10,10 +10,12 @@ from .algo import (base_df, tag_pivots, tag_zigzag, tag_regression, compute_conf
                    cluster_prices, adaptive_window_start,
                    fit_fib_grid_to_clusters, levels_from_hl)
 from .config import RetracementConfig
+from .line_factors import build_line_factors
 from ...writer import StepWriter
 
 log = logging.getLogger(__name__)
 MAX_CANDIDATES = 6  # 每次 fit 最多返回的候选组数
+CLUSTER_ALIGN_TOL_PCT = 0.02  # 判定 fib 线与聚类中心"对齐"的容差, 与 algo._score_fit 的 tol_pct 一致
 
 
 def _compute_fib_at(feature_df, end_idx: int, cfg,
@@ -70,7 +72,24 @@ def _flatten_to_lines(fib_records: List[dict]) -> pd.DataFrame:
     rows = []
     for rec in fib_records:
         levels = json.loads(rec["levels_json"]) if isinstance(rec["levels_json"], str) else rec["levels_json"]
+        centers_json = rec.get("cluster_centers_json") or "[]"
+        centers = json.loads(centers_json) if isinstance(centers_json, str) else centers_json
+        nearest = []
         for ratio, price in levels:
+            level_price = round(price, 2)
+            center = min(centers, key=lambda item: abs(float(item[0]) - level_price)) if centers else None
+            nearest.append(center)
+        center_use_counts = {}
+        for center in nearest:
+            if center is not None:
+                center_price = float(center[0])
+                center_use_counts[center_price] = center_use_counts.get(center_price, 0) + 1
+        for (ratio, price), center in zip(levels, nearest):
+            level_price = round(price, 2)
+            center_price = float(center[0]) if center is not None else None
+            center_conf = float(center[1]) if center is not None else None
+            distance = abs(level_price - center_price) if center_price is not None else None
+            span = rec["leg_high"] - rec["leg_low"]
             rows.append({
                 "effective_ts": rec["effective_ts"],
                 "multiplier": rec["multiplier"],
@@ -84,14 +103,23 @@ def _flatten_to_lines(fib_records: List[dict]) -> pd.DataFrame:
                 "invalidate_reason": rec.get("invalidate_reason"),
                 "source": rec.get("source"),
                 "ratio": round(ratio, 4),
-                "price": round(price, 2),
-                "is_extrapolated": abs(ratio - 1.0) < 0.001,
+                "price": level_price,
+                "is_extrapolated": abs(ratio) < 0.001 or abs(ratio - 1.0) < 0.001,
+                "nearest_cluster_center": round(center_price, 2) if center_price is not None else None,
+                "nearest_cluster_conf": round(center_conf, 4) if center_conf is not None else None,
+                "cluster_distance": round(distance, 4) if distance is not None else None,
+                "cluster_distance_ratio": round(distance / span, 6) if distance is not None and span > 0 else None,
+                "is_cluster_aligned": distance / span <= CLUSTER_ALIGN_TOL_PCT if distance is not None and span > 0 else False,
+                "cluster_center_reused": center_use_counts.get(center_price, 0) > 1 if center_price is not None else False,
             })
     if not rows:
         return pd.DataFrame(columns=["effective_ts", "multiplier", "direction", "fib_score",
                                      "leg_low", "leg_high", "leg_start_ts", "leg_end_ts",
                                      "invalidated_ts", "invalidate_reason", "source",
-                                     "ratio", "price", "is_extrapolated"])
+                                     "ratio", "price", "is_extrapolated",
+                                     "nearest_cluster_center", "nearest_cluster_conf",
+                                     "cluster_distance", "cluster_distance_ratio",
+                                     "is_cluster_aligned", "cluster_center_reused"])
     return pd.DataFrame(rows)
 
 
@@ -311,6 +339,9 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
     # 写 result: 打平为 PriceLine 维度
     result_df = _flatten_to_lines(all_records)
     writer.write_result(result_df)
+
+    factor_df = build_line_factors(result_df, feature_df)
+    writer.write_step("line_factors", factor_df)
 
     n_lines = len(result_df)
     log.info(f'[fib_retracement] 完成: klines={n} fib_groups={len(step3_df)} lines={n_lines} invalidations={invalidation_count}')

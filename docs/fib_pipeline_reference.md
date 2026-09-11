@@ -271,8 +271,8 @@ final_score = score × coverage
 | `score` | float64 | Fib 网格拟合得分 | `_score_fit` 返回 |
 | `leg_start_ts` | int64 | 窗口起始时间戳 | recent_df 首 bar 的 ts |
 | `leg_end_ts` | int64 | 窗口结束时间戳 | recent_df 末 bar 的 ts |
-| `leg_low` | float64 | Fib 组 0% 价格 | `_solve_hl` 解出的 low |
-| `leg_high` | float64 | Fib 组 100% 价格 | `_solve_hl` 解出的 high |
+| `leg_low` | float64 | Fib 组价格下边界 | `_solve_hl` 解出的 low |
+| `leg_high` | float64 | Fib 组价格上边界 | `_solve_hl` 解出的 high |
 | `levels_json` | str (JSON) | 7 条 Fib 线 `[[ratio, price], ...]` | `levels_from_hl(high, low, direction)` |
 | `cluster_centers_json` | str (JSON) | 聚类中心 `[[price, conf], ...]` | 当次窗口 cluster_prices 的结果 |
 | `invalidated_ts` | int64/null | 失效时间戳 | 生命周期管理判定 |
@@ -294,13 +294,13 @@ final_score = score × coverage
 
 ```json
 [
-  [0.0,   3480.00],   // ratio=0%   → leg_high (direction=up)，数学确定
+  [0.0,   3480.00],   // ratio=0%   → leg_high (direction=up)，由内层锚点外推，参与拟合评分
   [0.236, 3449.32],   // ratio=23.6%，由 high - span×0.236 计算
   [0.382, 3430.36],   // ratio=38.2%
   [0.5,   3415.00],   // ratio=50%
   [0.618, 3399.64],   // ratio=61.8%
   [0.786, 3377.88],   // ratio=78.6%
-  [1.0,   3350.00]    // ratio=100% → leg_low (direction=up)，数学外推
+  [1.0,   3350.00]    // ratio=100% → leg_low (direction=up)，由内层锚点外推，不参与拟合评分
 ]
 ```
 
@@ -316,7 +316,9 @@ final_score = score × coverage
 ]
 ```
 
-**用途**: 通过 `cluster_centers_json`，可以找到每条 Fib 线对齐了哪个原始聚类中心 —— 即从 Fib line 反向追溯到"市场共识价位"。
+**用途**: `cluster_centers_json` 保存拟合窗口内的**全部候选**聚类中心（平均约 21 个），是拟合的输入集合。它按 `(effective_ts, multiplier)` 唯一，同一时刻同一尺度下的所有候选 Fib 组共享同一份。
+
+该字段只保留在 step3。投产表会为每条 Fib Level 从该集合中解析出**它自己对应的那一个**中心，因此不会出现 JSON 列，也不会额外增加行数。
 
 ---
 
@@ -326,7 +328,7 @@ final_score = score × coverage
 
 `_flatten_to_lines(fib_records)` — 将 step3 的 Fib 组维度打平为 Fib Level 维度。
 
-**转换关系**: 1 个 Fib 组 (step3 的 1 行) → 7 行 (result 中 7 条 Fib Level)
+**转换关系**: 1 个 Fib 组 (step3 的 1 行) → 7 行 (result 中 7 条 Fib Level)，每行解析出自己对应的聚类中心
 
 ### 输出: result.parquet
 
@@ -345,21 +347,57 @@ final_score = score × coverage
 | `source` | str/null | 产生来源 | step3.source |
 | `ratio` | float64 | Fib 比例 (0.0~1.0) | levels_json 展开 |
 | `price` | float64 | Fib 线价格 | levels_json 展开 |
-| `is_extrapolated` | bool | 是否为外推线 (ratio=1.0) | ratio == 1.0 |
+| `is_extrapolated` | bool | 是否为外推线 | ratio 为 0.0 或 1.0 |
+| `nearest_cluster_center` | float64/null | 该 Fib 线对应的聚类中心价格 | 从 step3.cluster_centers_json 中取距离 `price` 最近的中心 |
+| `nearest_cluster_conf` | float64/null | 该聚类中心的累计置信度 | 对应中心 `[price, conf]` 的 conf |
+| `cluster_distance` | float64/null | Fib 线与该中心的绝对价格距离 | `abs(price - nearest_cluster_center)` |
+| `cluster_distance_ratio` | float64/null | 距离相对 Fib 跨度的比例 | `cluster_distance / (leg_high - leg_low)` |
+| `is_cluster_aligned` | bool | 是否真正对齐（落在拟合容差内） | `cluster_distance_ratio <= 0.02`，与 `_score_fit` 的 `tol_pct` 一致 |
+| `cluster_center_reused` | bool | 该中心是否同时被本组其他比例使用 | 同一中心在本组的匹配计数 > 1 |
+
+### 行数与对应关系
+
+**行数完全由 `levels_json` 决定：1 个 Fib 组 → 7 行，与候选中心数量无关。** 每行携带它自己的那一个中心，不做交叉展开。
+
+对应关系分三种情况：
+
+| 情况 | 比例 | 行为 |
+|------|------|------|
+| 拟合锚点 | 内层 5 条中已对齐的 | 一一对应到各自的聚类中心，`is_cluster_aligned=true` |
+| 未对齐内层 | 内层 5 条中超出 2% 容差的 | 仍回退给出最近中心，`is_cluster_aligned=false`，此时可能与邻居撞同一个中心 |
+| 外推端点 | 0.0 和 1.0 | 计算最近中心；若无更靠外的中心，则复用 0.236 / 0.786 的中心，`cluster_center_reused=true` |
+
+实测（5 组实验，约 2,200~2,330 组/实验）：
+
+- **已对齐的内层线，中心 100% 互不重复** —— 一一对应严格成立
+- 内层对齐率约 88~89%（拟合只要求 `min_assigned=2`，不强制 5 条全对齐）
+- 全部 5 条内层都算上时，约 81% 的组完全不重复，剩余重复均来自未对齐的回退线
+- 0 和 1 端点 100% 都能拿到中心，其中约 65~70% 复用相邻内层的中心
+
+查询建议：需要严格一一对应的锚点关系时加 `WHERE is_cluster_aligned`；需要每条线都有价格参照时直接用 `nearest_cluster_center`。
 
 ### 示例数据
 
 ```
-| effective_ts | mult | dir | fib_score | leg_low | leg_high | ratio | price   | is_extrapolated |
-|-------------|------|-----|-----------|---------|----------|-------|---------|-----------------|
-| 1719532800  | 1    | up  | 4.52      | 3350.00 | 3480.00  | 0.000 | 3480.00 | false           |
-| 1719532800  | 1    | up  | 4.52      | 3350.00 | 3480.00  | 0.236 | 3449.32 | false           |
-| 1719532800  | 1    | up  | 4.52      | 3350.00 | 3480.00  | 0.382 | 3430.36 | false           |
-| 1719532800  | 1    | up  | 4.52      | 3350.00 | 3480.00  | 0.500 | 3415.00 | false           |
-| 1719532800  | 1    | up  | 4.52      | 3350.00 | 3480.00  | 0.618 | 3399.64 | false           |
-| 1719532800  | 1    | up  | 4.52      | 3350.00 | 3480.00  | 0.786 | 3377.88 | false           |
-| 1719532800  | 1    | up  | 4.52      | 3350.00 | 3480.00  | 1.000 | 3350.00 | true            |
+取自 fib001 的真实单组数据（7 行，每行一个中心）：
+
 ```
+| ratio | price   | center  | conf   | dist  | dist_ratio | aligned | reused | extrap |
+|-------|---------|---------|--------|-------|------------|---------|--------|--------|
+| 0.000 |  980.91 |  980.67 | 0.6364 |  0.24 |   0.005093 | true    | false  | true   |
+| 0.236 |  992.03 |  991.46 | 0.2727 |  0.57 |   0.012097 | true    | false  | false  |
+| 0.382 |  998.91 |  998.91 | 0.2727 |  0.00 |   0.000000 | true    | false  | false  |
+| 0.500 | 1004.47 | 1005.78 | 0.2727 |  1.31 |   0.027802 | false   | false  | false  |
+| 0.618 | 1010.03 | 1010.03 | 0.2727 |  0.00 |   0.000000 | true    | false  | false  |
+| 0.786 | 1017.95 | 1017.32 | 0.2727 |  0.63 |   0.013370 | true    | true   | false  |
+| 1.000 | 1028.03 | 1017.32 | 0.2727 | 10.71 |   0.227297 | false   | true   | true   |
+```
+
+**解读**:
+- 0.382 和 0.618 距离为 0，是拟合时直接落在聚类中心上的锚点
+- 0.500 距离比例 0.0278 超出 2% 容差，标记 `aligned=false`，但仍给出最近中心 1005.78
+- 1.000 是外推端点，外侧没有更远的中心，复用了 0.786 的中心 1017.32，两行 `reused=true`
+- 0.000 虽然也是外推端点，但恰好有中心 980.67 贴近，`aligned=true` 且未复用
 
 ---
 
@@ -506,7 +544,14 @@ score = proximity      × w_proximity  (2.0)
    │   │  leg_low/high    ← step3.leg_low/high                       │
    │   │  ratio           ← levels_json[i][0]  展开                  │
    │   │  price           ← levels_json[i][1]  展开                  │
-   │   │  is_extrapolated ← ratio == 1.0                             │
+   │   │  is_extrapolated ← ratio == 0.0 或 ratio == 1.0             │
+   │   │  nearest_cluster_center ← 从 step3.cluster_centers_json     │
+   │   │                            中取距 price 最近的那一个中心     │
+   │   │  nearest_cluster_conf ← 该聚类中心的累计置信度               │
+   │   │  cluster_distance ← |price - nearest_cluster_center|        │
+   │   │  cluster_distance_ratio ← cluster_distance / Fib跨度        │
+   │   │  is_cluster_aligned ← cluster_distance_ratio <= 0.02        │
+   │   │  cluster_center_reused ← 同一中心是否匹配多个 ratio          │
    │   └──┬───────────────────────────────────────────────────────────┘
    │      │
    ▼      ▼
@@ -548,8 +593,12 @@ signals.parquet 中某条信号:
   2. 该组的 cluster_centers_json:
      [[3362.45, 2.85], [3398.20, 1.40], [3425.60, 3.10], [3448.90, 2.25], [3470.30, 1.80]]
 
-  3. level_price=3449.32 最近的 cluster center = 3448.90 (距离 0.42)
-     → span = 3480-3350 = 130, 0.42/130 = 0.3% < 2% 容差
+  3. result.parquet 已按 Level 打平出对应中心, 无需再解析 JSON:
+     nearest_cluster_center=3448.90
+     nearest_cluster_conf=2.25
+     cluster_distance=0.42
+     cluster_distance_ratio=0.003231
+     is_cluster_aligned=true      ← 0.3% < 2% 容差, 属于真实拟合锚点
      → 该 Fib 线对齐了 center=3448.90 (conf=2.25) 这个聚合价格
 
   4. center=3448.90 来源于 cluster_prices:
