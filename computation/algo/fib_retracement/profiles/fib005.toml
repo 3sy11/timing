@@ -17,3 +17,6 @@ stale_lookback = 40
 stale_touch_tol_k = 0.06
 stale_min_coverage = 0.25
 stale_check_interval = 12
+line_factor_history_bars = 0
+line_factor_touch_tolerance_pct = 0.001
+line_factor_consensus_tolerance_pct = 0.001

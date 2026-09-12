@@ -8,3 +8,8 @@ recent_bars = 90
 skip_recent = 10
 min_leg_span_pct = 0.03
 top_n = 6
+
+# line_factor.parquet 参数
+line_factor_history_bars = 0  # 0 = 生效前全部历史 K 线
+line_factor_touch_tolerance_pct = 0.001
+line_factor_consensus_tolerance_pct = 0.001

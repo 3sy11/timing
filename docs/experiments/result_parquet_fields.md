@@ -96,4 +96,4 @@
 
 - 全管道说明（含 step1~3 血缘）：[fib_pipeline_reference.md](../fib_pipeline_reference.md)
 - 参数扫描实验记录：[fib_param_sweep_2026-09-02.md](./fib_param_sweep_2026-09-02.md)
-- 衍生指标表：[line_factors.md](./line_factors.md)
+- 衍生指标表：[line_factors.md](./line_factors.md)（产物文件为 `line_factor.parquet`）

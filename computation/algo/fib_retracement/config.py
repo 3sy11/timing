@@ -39,6 +39,10 @@ DEFAULTS = {
     "stale_touch_tol_k": 0.06,
     "stale_min_coverage": 0.4,
     "stale_check_interval": 10,
+    # line_factor.parquet：由 result + K 线派生，仍随同 compute_id 配置和追溯
+    "line_factor_history_bars": 0,
+    "line_factor_touch_tolerance_pct": 0.001,
+    "line_factor_consensus_tolerance_pct": 0.001,
     # 兼容旧参数（分析层使用）
     "top_n": 6,
     "min_bars": 200,

@@ -10,7 +10,7 @@ from .algo import (base_df, tag_pivots, tag_zigzag, tag_regression, compute_conf
                    cluster_prices, adaptive_window_start,
                    fit_fib_grid_to_clusters, levels_from_hl)
 from .config import RetracementConfig
-from .line_factors import build_line_factors
+from .line_factors import build_line_factors, to_chinese_line_factor
 from ...writer import StepWriter
 
 log = logging.getLogger(__name__)
@@ -340,8 +340,14 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
     result_df = _flatten_to_lines(all_records)
     writer.write_result(result_df)
 
-    factor_df = build_line_factors(result_df, feature_df)
-    writer.write_step("line_factors", factor_df)
+    factor_df = build_line_factors(
+        result_df,
+        feature_df,
+        history_bars=cfg.line_factor_history_bars,
+        touch_tolerance_pct=cfg.line_factor_touch_tolerance_pct,
+        consensus_tolerance_pct=cfg.line_factor_consensus_tolerance_pct,
+    )
+    writer.write_step("line_factor", to_chinese_line_factor(factor_df))
 
     n_lines = len(result_df)
     log.info(f'[fib_retracement] 完成: klines={n} fib_groups={len(step3_df)} lines={n_lines} invalidations={invalidation_count}')
