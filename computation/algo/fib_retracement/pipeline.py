@@ -10,6 +10,7 @@ from .algo import (base_df, tag_pivots, tag_zigzag, tag_regression, compute_conf
                    cluster_prices, adaptive_window_start,
                    fit_fib_grid_to_clusters, levels_from_hl)
 from .config import RetracementConfig
+from .line_events import build_line_events
 from .line_factors import build_line_factors, to_chinese_line_factor
 from ...writer import StepWriter
 
@@ -152,7 +153,9 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
         log.warning(f'[fib_retracement] 数据不足: n={n} start_pos={start_pos} end_pos={end_pos}')
         writer.write_step("step3_fib_groups", pd.DataFrame())
         writer.write_result(pd.DataFrame())
-        return {"klines": n, "result_rows": 0, "invalidations": 0}
+        writer.write_step("line_factor", pd.DataFrame())
+        writer.write_step("line_events", pd.DataFrame())
+        return {"klines": n, "result_rows": 0, "invalidations": 0, "line_events": 0}
 
     closes = feature_df["close"].tolist()
     ts_list = feature_df["ts"].tolist()
@@ -349,6 +352,14 @@ def run_pipeline(klines: List[dict], cfg: RetracementConfig, writer: StepWriter)
     )
     writer.write_step("line_factor", to_chinese_line_factor(factor_df))
 
+    event_df = build_line_events(
+        result_df, feature_df,
+        compute_id=writer.compute_id, symbol=writer.symbol, interval=writer.interval,
+        cfg=cfg,
+    )
+    writer.write_step("line_events", event_df)
+
     n_lines = len(result_df)
-    log.info(f'[fib_retracement] 完成: klines={n} fib_groups={len(step3_df)} lines={n_lines} invalidations={invalidation_count}')
-    return {"klines": n, "fib_groups": len(step3_df), "result_rows": n_lines, "invalidations": invalidation_count}
+    log.info(f'[fib_retracement] 完成: klines={n} fib_groups={len(step3_df)} lines={n_lines} events={len(event_df)} invalidations={invalidation_count}')
+    return {"klines": n, "fib_groups": len(step3_df), "result_rows": n_lines,
+            "line_events": len(event_df), "invalidations": invalidation_count}
