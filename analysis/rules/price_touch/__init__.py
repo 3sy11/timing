@@ -1,4 +1,4 @@
-"""price_touch Rule — v3 价格线触碰信号检测。"""
+"""price_touch — 当天触线候选，证据来自 result + line_events。"""
 from .config import PriceTouchConfig
 from .detect import run_detection
 

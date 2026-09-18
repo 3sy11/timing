@@ -66,7 +66,6 @@ DEFAULTS = {
     "weak_threshold": 2.0,
     # line_events 事件口径（可用 profile / --override 调整）
     "event_touch_k": 0.001,
-    "event_confirm_bars": 3,
     "event_atr_period": 14,
     "event_atr_band_k": 0.25,
     "event_atr_horizon": 5,

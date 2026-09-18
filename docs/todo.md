@@ -24,7 +24,7 @@
 | Profile | `analysis/rules/{rule_name}/profiles/*.toml` | 预设参数组合 |
 | Registry | `analysis/rules/__init__.py` | RULE_REGISTRY 自动发现 |
 
-**流程**: `read_structures(compute_id)` → `detect_fn(df, config)` → `write_signals(analysis_id)`
+**流程**: `read_result + read_line_events` → `price_touch.detect` → `write_candidates(analysis_id)`
 
 ### Decision Rules（已实现，待统一）
 

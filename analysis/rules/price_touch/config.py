@@ -1,13 +1,15 @@
-"""PriceTouchConfig — v3 价格线触碰检测配置。"""
-import os, tomllib, logging
+"""price_touch 配置 — 只调当天碰到/价近，不改 Computation 的 ATR 口径。"""
+import os
+import tomllib
+import logging
 
 log = logging.getLogger(__name__)
 
 DEFAULTS = {
-    "proximity_k": 0.1,           # 检测半径 = price × proximity_k × 0.01 (即0.1%)
-    "w_consensus": 0.7,           # consensus 归一化权重
-    "w_proximity": 0.3,           # proximity 权重
+    "proximity_k": 0.001,
+    "neighbor_k": 0.001,
     "scan_bars": 0,
+    "emit_if_no_prefit": True,
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")
@@ -32,8 +34,10 @@ class PriceTouchConfig(dict):
         return {"profile": getattr(self, "_profile_name", None), "overrides": getattr(self, "_override_data", {})}
 
     def __getattr__(self, key):
-        try: return self[key]
-        except KeyError: raise AttributeError(f"PriceTouchConfig has no key '{key}'")
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(f"PriceTouchConfig has no key '{key}'")
 
     def __setattr__(self, key, value):
         self[key] = value
@@ -58,6 +62,8 @@ def _parse_overrides(overrides: list[str] | None) -> dict:
         if "=" not in item:
             continue
         key, val_str = item.split("=", 1)
-        try: result[key.strip()] = _json.loads(val_str.strip())
-        except (ValueError, _json.JSONDecodeError): result[key.strip()] = val_str.strip()
+        try:
+            result[key.strip()] = _json.loads(val_str.strip())
+        except (ValueError, _json.JSONDecodeError):
+            result[key.strip()] = val_str.strip()
     return result

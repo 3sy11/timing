@@ -209,7 +209,7 @@ class AnalysisProtocol(Protocol):
             return snapshots_by_ts[sorted_cts[idx]] if idx >= 0 else {}
         return resolver
 
-    # ═══ 旧接口 (deprecated, fib_touch 兼容) ═══
+    # ═══ 旧接口（结构快照，price_touch 不再走这里） ═══
 
     def read_structures_timeseries(self, algo: str, compute_id: str,
                                    symbol: str, interval: str):
@@ -294,6 +294,36 @@ class AnalysisProtocol(Protocol):
         pattern = os.path.join(klines_dir, "*.parquet")
         with duckdb.connect() as conn:
             return conn.execute(f"SELECT DISTINCT ON (ts) * FROM read_parquet('{pattern}') ORDER BY ts").fetchdf()
+
+    def _compute_dir(self, algo: str, compute_id: str, symbol: str, interval: str) -> str:
+        return os.path.join(self.warehouse_path, "computation", algo, compute_id, symbol, interval)
+
+    def read_result(self, algo: str, compute_id: str, symbol: str, interval: str) -> pd.DataFrame:
+        path = os.path.join(self._compute_dir(algo, compute_id, symbol, interval), "result.parquet")
+        if not os.path.isfile(path):
+            log.warning(f'[分析] result 不存在: {path}')
+            return pd.DataFrame()
+        with duckdb.connect() as conn:
+            return conn.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
+
+    def read_line_events(self, algo: str, compute_id: str, symbol: str, interval: str) -> pd.DataFrame:
+        path = os.path.join(self._compute_dir(algo, compute_id, symbol, interval), "line_events.parquet")
+        if not os.path.isfile(path):
+            log.warning(f'[分析] line_events 不存在: {path}')
+            return pd.DataFrame()
+        with duckdb.connect() as conn:
+            return conn.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
+
+    def write_candidates(self, rows: List[dict], analysis_id: str,
+                         symbol: str, interval: str) -> str:
+        from analysis.rules.price_touch.detect import CANDIDATE_COLS
+        base_dir = os.path.join(self.warehouse_path, "signals", analysis_id, symbol, interval)
+        os.makedirs(base_dir, exist_ok=True)
+        path = os.path.join(base_dir, "candidates.parquet")
+        df = pd.DataFrame(rows, columns=CANDIDATE_COLS) if rows else pd.DataFrame(columns=CANDIDATE_COLS)
+        df.to_parquet(path, index=False)
+        log.info(f'[分析] 写入候选 → {path} ({len(rows)} 条)')
+        return path
 
     def write_signals(self, signals: List[dict], analysis_id: str,
                       symbol: str, interval: str) -> str:

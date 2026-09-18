@@ -1,9 +1,0 @@
-# gate_standard — 标准: 均衡参数
-tolerance_k = 0.08
-min_leg_range_pct = 0.03
-cooldown_bars = 5
-history_lookback_bars = 200
-volume_lookback = 20
-volume_threshold = 1.5
-breakout_tolerance_k = 0.02
-scan_bars = 0

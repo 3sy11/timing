@@ -1,8 +1,7 @@
 """从 result.parquet + klines 加工触碰事件事实表 line_events。
 
 一行 = 一条 Fib/聚类中心目标价，在拟合前或拟合窗内的一次已完成触碰。
-同一行同时保留：旧口径 outcome（close 刚出带）和 ATR 口径 outcome_atr。
-存活期不写事件。期末仍未离开百分带宽的进入不入库。
+只打 ATR 口径 outcome_atr。存活期不写事件。期末仍未离开触碰带的进入不入库。
 """
 from __future__ import annotations
 
@@ -15,7 +14,6 @@ import pandas as pd
 
 EVENT_PARAM_KEYS = (
     "event_touch_k",
-    "event_confirm_bars",
     "event_atr_period",
     "event_atr_band_k",
     "event_atr_horizon",
@@ -24,7 +22,6 @@ EVENT_PARAM_KEYS = (
 
 EVENT_DEFAULTS = {
     "event_touch_k": 0.001,
-    "event_confirm_bars": 3,
     "event_atr_period": 14,
     "event_atr_band_k": 0.25,
     "event_atr_horizon": 5,
@@ -36,8 +33,8 @@ EVENT_COLS = [
     "effective_ts", "multiplier", "direction", "leg_low", "leg_high", "ratio",
     "fib_group_id",
     "target_kind", "target_price", "period",
-    "event_id", "entered_ts", "completed_ts", "approach", "outcome",
-    "touch_bar_count", "confirm_bars",
+    "event_id", "entered_ts", "completed_ts", "approach",
+    "touch_bar_count",
     "atr", "mfe_atr", "mae_atr", "close_back", "outcome_atr", "atr_bars",
 ]
 
@@ -108,7 +105,6 @@ def _scan_period(
     if i1 <= i0:
         return []
     touch_k = float(params["event_touch_k"])
-    confirm_bars = int(params["event_confirm_bars"])
     atr_band_k = float(params["event_atr_band_k"])
     horizon = int(params["event_atr_horizon"])
     thr = float(params["event_atr_threshold"])
@@ -131,31 +127,15 @@ def _scan_period(
         if j >= n:
             break
         abs_enter = i0 + enter
-        r_enter = float(r_slice[enter])
         if abs_enter > 0:
             prev = float(closes[abs_enter - 1])
             approach = "from_above" if prev > price else "from_below"
         else:
             approach = "from_above" if float(closes[abs_enter]) >= price else "from_below"
-        leave = i0 + j
-        window_end = min(leave + confirm_bars, i1)
-        outcome = "no_bounce"
-        completed = leave
-        n_confirm = 0
-        for k in range(leave, window_end):
-            n_confirm += 1
-            c = float(closes[k])
-            bounced = (
-                (approach == "from_above" and c > price + r_enter)
-                or (approach == "from_below" and c < price - r_enter)
-            )
-            completed = k
-            if bounced:
-                outcome = "bounce"
-                break
         atr_e = float(atr[abs_enter]) if abs_enter < len(atr) else float("nan")
         atr_end = min(abs_enter + horizon, i1)
         atr_bars = atr_end - abs_enter
+        completed = atr_end - 1 if atr_bars > 0 else i0 + j
         mfe = mae = 0.0
         outcome_atr = None
         close_back = None
@@ -193,9 +173,7 @@ def _scan_period(
             "entered_ts": int(ts[abs_enter]),
             "completed_ts": int(ts[completed]),
             "approach": approach,
-            "outcome": outcome,
             "touch_bar_count": int(j - enter),
-            "confirm_bars": int(n_confirm),
             "atr": round(atr_e, 4) if atr_e == atr_e else None,
             "mfe_atr": mfe_atr,
             "mae_atr": mae_atr,

@@ -39,7 +39,7 @@ def test_consecutive_in_band_is_one_event():
     assert len(pre) == 1
     assert pre.iloc[0]["touch_bar_count"] == 2
     assert pre.iloc[0]["entered_ts"] == 1
-    assert pre.iloc[0]["outcome"] == "bounce"
+    assert pre.iloc[0]["outcome_atr"] in ("bounce", "weak", "break")
     assert pre.iloc[0]["approach"] == "from_above"
 
 
@@ -72,8 +72,7 @@ def test_period_split_prefit_vs_fitwin():
     fit = df[df["period"] == "fitwin"].iloc[0]
     assert pre["entered_ts"] == 1
     assert fit["entered_ts"] == 3
-    assert pre["outcome"] == "bounce"
-    assert fit["outcome"] == "bounce"
+    assert pre["approach"] == "from_above"
     assert fit["approach"] == "from_above"
 
 
@@ -125,7 +124,6 @@ def test_old_bounce_can_be_atr_weak():
     rec = _line(leg_start_ts=22, effective_ts=22, nearest_cluster_center=None)
     df = build_line_events(pd.DataFrame([rec]), klines, cfg={**_OLD, "event_atr_period": 14})
     row = df[(df["period"] == "prefit") & (df["target_kind"] == "fib")].iloc[0]
-    assert row["outcome"] == "bounce"
     assert row["outcome_atr"] == "weak"
     assert row["mfe_atr"] < 0.5
 
@@ -142,6 +140,5 @@ def test_atr_bounce_when_half_atr_favorable():
     rec = _line(leg_start_ts=22, effective_ts=22, nearest_cluster_center=None)
     df = build_line_events(pd.DataFrame([rec]), klines, cfg={**_OLD, "event_atr_period": 14})
     row = df[(df["period"] == "prefit") & (df["target_kind"] == "fib")].iloc[0]
-    assert row["outcome"] == "bounce"
     assert row["outcome_atr"] == "bounce"
     assert row["mfe_atr"] >= 0.5

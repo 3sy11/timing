@@ -11,7 +11,7 @@
 3. [Stage 2: 置信度计算 (Confidence)](#stage-2-置信度计算)
 4. [Stage 3: 聚类 + Fib 网格拟合 + 生命周期管理](#stage-3-聚类--fib-网格拟合--生命周期管理)
 5. [Result: 打平投产表](#result-打平投产表)
-6. [Analysis: fib_touch 信号检测](#analysis-fib_touch-信号检测)
+6. [Analysis: price_touch 候选](#analysis-price_touch-候选)
 7. [字段血缘图](#字段血缘图)
 
 ---
@@ -33,8 +33,10 @@ K线 (klines.parquet)
   ├── Result: _flatten_to_lines
   │     └─→ result.parquet              ← 投产表（Fib Level 维度）
   │
-  └── Analysis: fib_touch detect
-        └─→ signals.parquet             ← 信号输出
+  ├── line_events.parquet             ← 拟合前/窗触碰事实（ATR 口径）
+  │
+  └── Analysis: price_touch
+        └─→ candidates.parquet          ← 当天触线候选（无 score）
 ```
 
 **源文件**:
@@ -42,7 +44,8 @@ K线 (klines.parquet)
 - 纯函数算法: `timing/computation/algo/fib_retracement/algo.py`
 - 配置: `timing/computation/algo/fib_retracement/config.py`
 - 数据模型: `timing/computation/algo/fib_retracement/models.py`
-- 信号检测: `timing/analysis/rules/fib_touch/detect.py`
+- 事件事实: `timing/computation/algo/fib_retracement/line_events.py`
+- 候选检测: `timing/analysis/rules/price_touch/detect.py`
 
 **数据目录结构**:
 ```
@@ -53,6 +56,10 @@ warehouse/timing/
         ├── step2_confidence.parquet
         ├── step3_fib_groups.parquet
         ├── result.parquet
+        ├── line_events.parquet
+        └── manifest.json
+  └── signals/{analysis_id}/{symbol}/{interval}/
+        ├── candidates.parquet
         └── manifest.json
 ```
 
@@ -401,72 +408,25 @@ final_score = score × coverage
 
 ---
 
-## Analysis: fib_touch 信号检测
+## Analysis: price_touch 候选
+
+旧的 `fib_touch`（proximity 加权分、`signals.parquet`）已删除。分析层只出候选事实表。
 
 ### 数据流
 
 ```
-step3_fib_groups.parquet ──→ read_structures_timeseries ──→ FibGroup 列表
-                                                              │
-klines.parquet ────────────→ base_df ─────────────────────────┤
-                                                              ▼
-                                                    detect_bar_signals (每根 bar)
-                                                              │
-                                                              ▼
-                                                    signals.parquet
+result.parquet      ──→ 当时存活的 Fib 行（SCD2 / PIT）
+line_events.parquet ──→ 该行拟合前/窗的 outcome_atr（已冻结）
+klines.parquet      ──→ 当天高低点是否碰到
+                              │
+                              ▼
+                    price_touch.run_detection
+                              │
+                              ▼
+                    candidates.parquet
 ```
 
-### 核心函数 (detect.py)
-
-| 函数 | 作用 |
-|------|------|
-| `measure_proximity(close, groups, cfg)` | 对所有 7 线测量距离，返回感知半径内的记录 |
-| `compute_consensus(records, tolerance)` | 统计同一价位附近有多少独立 Fib 组共振 |
-| `evaluate_level_history(df, level_price, tol, bar_idx, lookback)` | 计算某价位的历史触碰次数和弹回率 |
-| `compute_volume_ratio(df, bar_idx, lookback)` | 当前 bar 成交量 / 过去均量 |
-| `compute_score_derived(proximity, bounce, vol, consensus, ratio, cfg)` | 加权综合评分 |
-
-### proximity 计算
-
-```
-leg_range = group.leg.high - group.leg.low
-max_dist  = leg_range × proximity_k            (默认 0.15)
-distance  = |close - level_price|
-proximity = 1 - distance / max_dist             (仅当 distance <= max_dist 时产出)
-```
-
-### score_derived 计算
-
-```
-score = proximity      × w_proximity  (2.0)
-      + bounce_rate    × w_bounce     (1.5)
-      + vol_ratio_norm × w_volume     (0.5)
-      + consensus      × w_consensus  (1.0)
-      + ratio_import   × w_ratio      (0.5)
-```
-
-其中:
-- `vol_ratio_norm = min(volume_ratio, volume_cap) / volume_cap`
-- `ratio_import` 由 `_RATIO_IMPORTANCE` 字典查得: 0.618→1.0, 0.5→0.9, 0.382/0.786→0.7, 0.236→0.5, 0/1→0.3
-
-### 输出: signals.parquet
-
-| 字段 | 类型 | 含义 | 来源 |
-|------|------|------|------|
-| `ts` | int64 | Bar 时间戳 | klines.ts |
-| `close` | float64 | Bar 收盘价 | klines.close |
-| `multiplier` | int | Fib 组时间尺度 | step3.multiplier |
-| `direction` | str | Fib 组方向 | step3.direction |
-| `ratio` | float64 | 被触碰的 Fib 比例 | levels_json 展开 |
-| `level_price` | float64 | 被触碰的 Fib 线价格 | levels_json 展开 |
-| `distance` | float64 | \|close - level_price\| | 实时计算 |
-| `proximity` | float64 [0,1] | 接近度 (越高越近) | 1 - distance/max_dist |
-| `bounce_rate` | float64 [0,1] | 历史弹回率 | evaluate_level_history |
-| `touch_count` | int | 历史触碰次数 | evaluate_level_history |
-| `volume_ratio` | float64 | 当前量/均量 | compute_volume_ratio |
-| `consensus` | int | 共振组数 | compute_consensus |
-| `approach` | str | 接近方向 | "from_above"/"from_below"/"at_level" |
-| `score_derived` | float64 | 综合评分 | 加权公式 |
+字段契约见 [experiments/candidates.md](./experiments/candidates.md)。参数只有 `proximity_k` / `neighbor_k` / `scan_bars` / `emit_if_no_prefit`，不引用 Computation 的 `event_*`。
 
 ---
 
@@ -554,24 +514,23 @@ score = proximity      × w_proximity  (2.0)
    │   │  cluster_center_reused ← 同一中心是否匹配多个 ratio          │
    │   └──┬───────────────────────────────────────────────────────────┘
    │      │
+   │      ▼
+   │   ┌──────────────────────────────────────────────────────────────┐
+   │   │ line_events.parquet（拟合前/窗已完成触碰，ATR 口径）          │
+   │   │  fib_group_id ← hash(effective_ts, multiplier, direction,    │
+   │   │                     round(leg_low,4), round(leg_high,4))    │
+   │   │  period       ← prefit / fitwin                             │
+   │   │  outcome_atr  ← bounce / break / weak                       │
+   │   └──┬───────────────────────────────────────────────────────────┘
+   │      │
    ▼      ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Analysis: signals.parquet                                            │
-│  ts            ← klines.ts                                           │
-│  close         ← klines.close                                        │
-│  multiplier    ← step3.multiplier   (经 FibGroup 模型传递)            │
-│  direction     ← step3.direction                                     │
-│  ratio         ← levels_json → FibGroup.levels[i][0]                 │
-│  level_price   ← levels_json → FibGroup.levels[i][1]                 │
-│  distance      ← |close - level_price|                               │
-│  proximity     ← 1 - distance / (leg_range × proximity_k)            │
-│  bounce_rate   ← 回看 N bar 中 level_price 附近弹回次数/触碰次数      │
-│  touch_count   ← 回看 N bar 中 level_price 被触碰次数                │
-│  volume_ratio  ← 当前 bar volume / 过去 N bar 平均 volume             │
-│  consensus     ← 该价位附近有多少个独立 (mult,dir) Fib 组共振          │
-│  approach      ← 从上/从下/在线上                                     │
-│  score_derived ← proximity×2 + bounce×1.5 + vol×0.5 + consensus×1    │
-│                   + ratio_importance×0.5                              │
+│ Analysis: candidates.parquet                                         │
+│  ts / close / approach     ← klines                                  │
+│  level_price / ratio / 组键 ← 当时存活的 result 行                    │
+│  pre_* / fit_*             ← 该行 line_events 按 period 聚合          │
+│  nearby_fib_*              ← 当时价近的其他存活 Fib 行（只用 prefit）   │
+│  nearby_cluster_*          ← 当时价近的去重中心（只用 prefit）         │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -582,7 +541,7 @@ score = proximity      × w_proximity  (2.0)
 ### 从信号追溯到原始聚类
 
 ```
-signals.parquet 中某条信号:
+candidates.parquet 中某条候选:
   ts=1719792000, level_price=3449.32, ratio=0.236, multiplier=1, direction=up
 
   1. 在 step3_fib_groups.parquet 中找:
