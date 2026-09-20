@@ -14,17 +14,26 @@
 
 ## 当前状态
 
-### Analysis Rules（已实现）
+### Feature Jobs（已实现）
 
 | 组件 | 路径 | 职责 |
 |------|------|------|
-| Rule Meta | `analysis/rules/{rule_name}/__init__.py` | 注册 name, upstream_algo, config_class, detect_fn |
-| Config | `analysis/rules/{rule_name}/config.py` | 参数管理，支持 profile + overrides |
-| Detect | `analysis/rules/{rule_name}/detect.py` | 纯检测逻辑，输入 DataFrame → 输出 signals |
-| Profile | `analysis/rules/{rule_name}/profiles/*.toml` | 预设参数组合 |
-| Registry | `analysis/rules/__init__.py` | RULE_REGISTRY 自动发现 |
+| Job Meta | `feature/jobs/{job}/__init__.py` | 注册 name, upstream_algo, config_class, build_fn |
+| Config | `feature/jobs/{job}/config.py` | 参数管理，支持 profile + overrides |
+| Build | `feature/jobs/{job}/detect.py` | 纯函数：事实 + 当天 bar → 宽表 |
+| Profile | `feature/jobs/{job}/profiles/*.toml` | 预设参数组合 |
+| Registry | `feature/jobs/__init__.py` | JOB_REGISTRY |
 
-**流程**: `read_result + read_line_events` → `price_touch.detect` → `write_candidates(analysis_id)`
+**流程**: `read_result + read_line_events` → `price_touch` → `write_candidates(feature_id)`
+
+### Analysis Rules（空壳，待规则）
+
+| 组件 | 路径 | 职责 |
+|------|------|------|
+| Registry | `analysis/rules/__init__.py` | `RULE_REGISTRY` 当前为空 |
+| Command | `analysis/command.py` | `Analyze` 读 `features/{feature_id}/`，无规则则中止 |
+
+**流程（目标）**: `read_candidates(feature_id)` → 规则 → `write_signals(analysis_id)`
 
 ### Decision Rules（已实现，待统一）
 
@@ -62,9 +71,9 @@ class Rule(Protocol):
 ### 3. 统一实验追踪
 
 ```
-compute_id → analysis_id → decision_id → execution_id
-    ↓              ↓              ↓              ↓
- 特征表         信号表         决策表        订单/成交表
+compute_id → feature_id → analysis_id → decision_id → execution_id
+    ↓              ↓              ↓              ↓              ↓
+ 事实表         宽表           信号表         决策表        订单/成交表
 ```
 
 每个环节：

@@ -306,24 +306,13 @@ class AnalysisProtocol(Protocol):
         with duckdb.connect() as conn:
             return conn.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
 
-    def read_line_events(self, algo: str, compute_id: str, symbol: str, interval: str) -> pd.DataFrame:
-        path = os.path.join(self._compute_dir(algo, compute_id, symbol, interval), "line_events.parquet")
+    def read_candidates(self, feature_id: str, symbol: str, interval: str) -> pd.DataFrame:
+        path = os.path.join(self.warehouse_path, "features", feature_id, symbol, interval, "candidates.parquet")
         if not os.path.isfile(path):
-            log.warning(f'[分析] line_events 不存在: {path}')
+            log.warning(f'[分析] candidates 不存在: {path}')
             return pd.DataFrame()
         with duckdb.connect() as conn:
             return conn.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
-
-    def write_candidates(self, rows: List[dict], analysis_id: str,
-                         symbol: str, interval: str) -> str:
-        from analysis.rules.price_touch.detect import CANDIDATE_COLS
-        base_dir = os.path.join(self.warehouse_path, "signals", analysis_id, symbol, interval)
-        os.makedirs(base_dir, exist_ok=True)
-        path = os.path.join(base_dir, "candidates.parquet")
-        df = pd.DataFrame(rows, columns=CANDIDATE_COLS) if rows else pd.DataFrame(columns=CANDIDATE_COLS)
-        df.to_parquet(path, index=False)
-        log.info(f'[分析] 写入候选 → {path} ({len(rows)} 条)')
-        return path
 
     def write_signals(self, signals: List[dict], analysis_id: str,
                       symbol: str, interval: str) -> str:

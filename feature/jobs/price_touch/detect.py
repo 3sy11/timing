@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 CANDIDATE_COLS = [
     "ts", "close", "approach", "ratio", "level_price",
     "fib_group_id", "multiplier", "direction",
-    "effective_ts", "invalidated_ts", "compute_id", "analysis_id",
+    "effective_ts", "invalidated_ts", "compute_id", "feature_id",
     "pre_test_n", "pre_hold_n", "pre_hold_rate", "pre_weak_share",
     "fit_test_n", "fit_hold_n", "fit_hold_rate", "fit_weak_share",
     "nearby_fib_n", "nearby_fib_hold_n", "nearby_fib_hold_rate",
@@ -87,7 +87,7 @@ def run_detection(
     events_df: pd.DataFrame,
     cfg: PriceTouchConfig = None,
     compute_id: str = "",
-    analysis_id: str = "",
+    feature_id: str = "",
 ) -> dict:
     cfg = cfg or PriceTouchConfig()
     empty = {"candidates": [], "summary": {"total_candidates": 0}}
@@ -185,7 +185,7 @@ def run_detection(
                 "multiplier": rec["_mult"], "direction": rec["_dir"],
                 "effective_ts": rec["_eff"],
                 "invalidated_ts": None if not _is_num(inv) else int(inv),
-                "compute_id": compute_id, "analysis_id": analysis_id,
+                "compute_id": compute_id, "feature_id": feature_id,
                 "pre_test_n": pre["test_n"], "pre_hold_n": pre["hold_n"],
                 "pre_hold_rate": pre["hold_rate"], "pre_weak_share": pre["weak_share"],
                 "fit_test_n": fit["test_n"], "fit_hold_n": fit["hold_n"],

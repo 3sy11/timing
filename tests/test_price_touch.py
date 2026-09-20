@@ -6,8 +6,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from computation.algo.fib_retracement.line_events import fib_group_id
-from analysis.rules.price_touch.config import PriceTouchConfig
-from analysis.rules.price_touch.detect import run_detection
+from feature.jobs.price_touch.config import PriceTouchConfig
+from feature.jobs.price_touch.detect import run_detection
 
 
 def _klines(rows):
@@ -53,7 +53,7 @@ def _run(klines, lines, events, **cfg):
         pd.DataFrame(lines),
         pd.DataFrame(events) if events else pd.DataFrame(),
         cfg=_cfg(**cfg),
-        compute_id="t", analysis_id="a",
+        compute_id="t", feature_id="a",
     )
 
 

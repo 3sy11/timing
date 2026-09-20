@@ -11,7 +11,7 @@
 3. [Stage 2: 置信度计算 (Confidence)](#stage-2-置信度计算)
 4. [Stage 3: 聚类 + Fib 网格拟合 + 生命周期管理](#stage-3-聚类--fib-网格拟合--生命周期管理)
 5. [Result: 打平投产表](#result-打平投产表)
-6. [Analysis: price_touch 候选](#analysis-price_touch-候选)
+6. [Feature: price_touch 宽表](#feature-price_touch-宽表)
 7. [字段血缘图](#字段血缘图)
 
 ---
@@ -35,8 +35,8 @@ K线 (klines.parquet)
   │
   ├── line_events.parquet             ← 拟合前/窗触碰事实（ATR 口径）
   │
-  └── Analysis: price_touch
-        └─→ candidates.parquet          ← 当天触线候选（无 score）
+  └── Feature: price_touch
+        └─→ candidates.parquet          ← 特征宽表（无 score）
 ```
 
 **源文件**:
@@ -45,7 +45,7 @@ K线 (klines.parquet)
 - 配置: `timing/computation/algo/fib_retracement/config.py`
 - 数据模型: `timing/computation/algo/fib_retracement/models.py`
 - 事件事实: `timing/computation/algo/fib_retracement/line_events.py`
-- 候选检测: `timing/analysis/rules/price_touch/detect.py`
+- 特征宽表: `timing/feature/jobs/price_touch/detect.py`
 
 **数据目录结构**:
 ```
@@ -58,7 +58,7 @@ warehouse/timing/
         ├── result.parquet
         ├── line_events.parquet
         └── manifest.json
-  └── signals/{analysis_id}/{symbol}/{interval}/
+  └── features/{feature_id}/{symbol}/{interval}/
         ├── candidates.parquet
         └── manifest.json
 ```
@@ -408,9 +408,9 @@ final_score = score × coverage
 
 ---
 
-## Analysis: price_touch 候选
+## Feature: price_touch 宽表
 
-旧的 `fib_touch`（proximity 加权分、`signals.parquet`）已删除。分析层只出候选事实表。
+旧的 `fib_touch`（proximity 加权分、`signals.parquet`）已删除。`price_touch` 在 Feature 模块出宽表，不是信号。分析层只对宽表做规则（规则尚未落地）。
 
 ### 数据流
 
@@ -525,7 +525,7 @@ klines.parquet      ──→ 当天高低点是否碰到
    │      │
    ▼      ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Analysis: candidates.parquet                                         │
+│ Feature: candidates.parquet                                          │
 │  ts / close / approach     ← klines                                  │
 │  level_price / ratio / 组键 ← 当时存活的 result 行                    │
 │  pre_* / fit_*             ← 该行 line_events 按 period 聚合          │
@@ -541,7 +541,7 @@ klines.parquet      ──→ 当天高低点是否碰到
 ### 从信号追溯到原始聚类
 
 ```
-candidates.parquet 中某条候选:
+features/.../candidates.parquet 中某条宽表行:
   ts=1719792000, level_price=3449.32, ratio=0.236, multiplier=1, direction=up
 
   1. 在 step3_fib_groups.parquet 中找:

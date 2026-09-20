@@ -16,7 +16,7 @@
 
 写在 Fib 的 `RetracementConfig` / `profiles/{compute_id}.toml`，也可用 `--override event_touch_k=0.0015`。`tmp/run_line_events.py` 会按 compute_id 读 profile。
 
-这些参数在事实表写出后应视为冻结。分析层 `price_touch` **不得**再引用它们来改标签。
+这些参数在事实表写出后应视为冻结。特征层 `price_touch` **不得**再引用它们来改标签。
 
 | 参数 | 默认 | 管什么 | 怎么调 |
 |------|------|--------|--------|
@@ -124,7 +124,7 @@ weak 不当失败、不进挡住率分母
 
 `fitwin_*` 同样算法，不得单独当主过滤。
 
-预测时：用 result 生命周期判断当天是否还活着；只用本表 prefit/fitwin；当天碰线与邻居写在 [candidates.md](./candidates.md)，不回写本表。
+预测时：用 result 生命周期判断当天是否还活着；只用本表 prefit/fitwin；当天碰线与邻居写在特征宽表 [candidates.md](./candidates.md)，不回写本表。
 
 ---
 
@@ -144,5 +144,5 @@ weak 不当失败、不进挡住率分母
 ## 相关文档
 
 - 实体维：[result_parquet_fields.md](./result_parquet_fields.md)
-- 分析候选：[candidates.md](./candidates.md)
+- 特征宽表：[candidates.md](./candidates.md)
 - 全管道：[fib_pipeline_reference.md](../fib_pipeline_reference.md)

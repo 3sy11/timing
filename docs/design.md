@@ -1,6 +1,6 @@
 # 服务架构设计 v3
 
-> 六模块分层 + Parquet 追加写入 + 独立实验 ID
+> 七模块分层 + Parquet 追加写入 + 独立实验 ID
 
 ---
 
@@ -9,78 +9,77 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                                                                             │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐                               │
-│  │  集成     │──→│  存储     │──→│  计算     │                               │
-│  │Integration│   │ Storage  │   │Computation│                               │
-│  └──────────┘   └──────────┘   └──────────┘                               │
-│       │               │              │                                      │
-│       ▼               ▼              ▼                                      │
-│  ┌─────────────────────────────────────────────┐                           │
-│  │         Parquet 表（数据资产）                 │                           │
-│  │  klines/ │ indicators/ │ structures/ │ ...   │                           │
-│  └───────────────────┬─────────────────────────┘                           │
-│                       │ 读取                                                │
-│  ┌────────────────────▼────────────────────────────────────────────┐       │
-│  │                                                                  │       │
-│  │  ┌──────────┐   ┌──────────┐   ┌──────────┐                    │       │
-│  │  │  分析     │──→│  决策     │──→│  执行     │                    │       │
-│  │  │ Analysis │   │ Decision │   │ Execution│                    │       │
-│  │  └──────────┘   └──────────┘   └──────────┘                    │       │
-│  │       │               │              │                          │       │
-│  │       ▼               ▼              ▼                          │       │
-│  │  signals.parquet decisions.parquet orders.parquet               │       │
-│  │                                                                  │       │
-│  └──────────────────────────────────────────────────────────────────┘       │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐             │
+│  │  集成     │──→│  存储     │──→│  计算     │──→│  特征     │             │
+│  │Integration│   │ Storage  │   │Computation│   │ Feature   │             │
+│  └──────────┘   └──────────┘   └──────────┘   └──────────┘             │
+│       │               │              │              │                    │
+│       ▼               ▼              ▼              ▼                    │
+│  ┌─────────────────────────────────────────────────────────┐           │
+│  │         Parquet 表（数据资产）                             │           │
+│  │  klines/ │ computation/ │ features/ │ ...                │           │
+│  └───────────────────┬─────────────────────────────────────┘           │
+│                       │ 读取                                            │
+│  ┌────────────────────▼────────────────────────────────────────────┐   │
+│  │                                                                  │   │
+│  │  ┌──────────┐   ┌──────────┐   ┌──────────┐                    │   │
+│  │  │  分析     │──→│  决策     │──→│  执行     │                    │   │
+│  │  │ Analysis │   │ Decision │   │ Execution│                    │   │
+│  │  └──────────┘   └──────────┘   └──────────┘                    │   │
+│  │       │               │              │                          │   │
+│  │       ▼               ▼              ▼                          │   │
+│  │  signals.parquet decisions.parquet orders.parquet               │   │
+│  │                                                                  │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 二、六模块职责
+## 二、七模块职责
 
 | 模块 | 职责 | 输入 | 输出(Parquet) | 实验ID |
 |------|------|------|--------------|--------|
 | **集成** | 外部数据导入（parquet文件/API/推送） | 外部数据源 | `klines/` | 无 |
 | **存储** | 小文件合并、分区、归档、TTL | 各模块的 parquet | 整理后的 parquet | 无 |
-| **计算** | SQL/Python 批量加工数据 | klines | `indicators/`, `structures/` | `compute_id` |
-| **分析** | 实时规则匹配，检测事件 | bar + structures | `signals/` | `analysis_id` |
+| **计算** | SQL/Python 批量加工实体与事件事实 | klines | `computation/`（result、line_events） | `compute_id` |
+| **特征** | 指标/标签计算后摊成宽表 | klines + result + line_events | `features/`（candidates 等） | `feature_id` |
+| **分析** | 对宽表做规则，产出信号 | 特征宽表 | `signals/` | `analysis_id` |
 | **决策** | 结合上下文做交易判断 | signals + positions | `decisions/` | `decision_id` |
 | **执行** | 下单、成交、持仓管理 | decisions | `orders/`, `fills/`, `positions/` | `execution_id` |
 
-### 计算 vs 分析 vs 决策 的边界
+### 计算 vs 特征 vs 分析 vs 决策 的边界
 
 ```
-计算                        分析                         决策
-─────                       ─────                        ─────
-"数据长什么样？"             "刚才发生了什么？"            "我应该做什么？"
+计算                        特征                         分析                         决策
+─────                       ─────                        ─────                        ─────
+"数据长什么样？"             "当时能看见哪些数？"          "这些数过不过关？"            "我应该做什么？"
 
-• 输入: 原始数据             • 输入: 实时 bar + 结构表     • 输入: signal + 持仓
-• 输出: 派生表               • 输出: signal（事实）        • 输出: decision（意图）
-• 无判断，纯数学             • 规则匹配（客观判断）        • 策略权衡（主观判断）
-• 批量/定时/幂等             • 逐 bar，有冷却状态         • 逐 signal，有持仓状态
-• 不知道"现在"              • 知道"现在发生了什么"        • 知道"我现在持有什么"
+• 输入: 原始 K 线            • 输入: 事实 + 当天 bar      • 输入: 特征宽表              • 输入: signal + 持仓
+• 输出: 实体维 / 事件事实    • 输出: 宽指标/宽标签        • 输出: signal               • 输出: decision
+• 无判断，纯数学             • 无交易规则，只算口径        • 规则匹配                   • 策略权衡
+• 不知道「今天拼宽」         • 知道「现在」这根 bar        • 知道规则是否触发            • 知道持仓
 ```
 
 **具体例子**：
 
 | 阶段 | 问的问题 | 回答 |
 |------|---------|------|
-| 计算 | "500根K线的 Fib 结构是什么？" | `levels: [(0.382, 1.03), (0.618, 0.98)]` |
-| 分析 | "这根 bar close=1.031，碰到什么了？" | `signal: {direction=long, level=1.03, strength=0.85}` |
-| 决策 | "收到这个信号，要不要买？" | `decision: {action=buy, qty=100, reason="strength>0.6 且无持仓"}` |
+| 计算 | "500根K线的 Fib 结构是什么？拟合前碰过几次？" | `result` 一行一条线；`line_events` 一次已完成触碰 |
+| 特征 | "今天碰到哪条存活线，它的挡住率和邻居怎样？" | `candidates` 一行宽指标 |
+| 分析 | "这些数过不过关，算不算信号？" | `signal`（规则尚未落地） |
+| 决策 | "收到这个信号，要不要买？" | `decision: {action=buy, qty=100}` |
 
 **代码归属**：
 
 | 现有代码 | 归属 | 原因 |
 |---------|------|------|
-| `algo.py: compute_retracement()` | 计算服务 | 纯数学加工，产出结构表 |
-| `algo.py: tag_pivots/zigzag/regression` | 计算服务 | 特征工程，无判断 |
-| `touch.py: compute_consensus_strength()` | 分析服务 | 规则匹配："是否触碰" |
-| `touch.py: check_breakout()` | 分析服务 | 规则匹配："是否突破" |
-| `touch.py: score_bar_signals()` | 分析服务 | 多维评分打分 |
-| `FibStrategy: strength > threshold` | 决策服务 | 策略判断："值不值得" |
-| `FibStrategy: 计算 qty/side` | 决策服务 | 仓位管理 |
+| `algo.py` / `pipeline.py` | 计算服务 | 拟合网格，产出 result |
+| `line_events.py` | 计算服务 | 拟合前/窗触碰事实 |
+| `feature/jobs/price_touch` | 特征服务 | 当天触线 + 历史/邻居指标摊宽 |
+| `analysis/rules` | 分析服务 | 对宽表做规则（当前空） |
+| `decision/strategies` | 决策服务 | 仓位与门禁 |
 
 ---
 
@@ -130,9 +129,16 @@ warehouse/timing/
 │       └── {compute_id_2}/
 │           └── ...
 │
-├── signals/                                         # 分析产出 — 实验数据
+├── features/                                        # 特征产出 — 宽表
+│   └── {feature_id}/
+│       └── {symbol}/{interval}/
+│           ├── candidates.parquet
+│           └── manifest.json
+│
+├── signals/                                         # 分析产出 — 规则后的信号
 │   └── {analysis_id}/
-│       └── part-{ts}.parquet
+│       └── {symbol}/{interval}/
+│           └── signals.parquet
 │
 ├── decisions/                                       # 决策产出 — 实验数据
 │   └── {decision_id}/
@@ -173,8 +179,10 @@ structure = duckdb.sql(f"SELECT * FROM read_parquet('{path}')").fetchone()
 | klines | `symbol, interval, ts` | 无 | `klines/{symbol}/{interval}/` |
 | indicators | `symbol, interval, ts` | 无 | `indicators/{symbol}/{interval}/` |
 | step{N}_xxx | `compute_id, symbol, interval, ts` | `compute_id` | `computation/{algo}/{compute_id}/step{N}_xxx_{sym}_{iv}.parquet` |
-| result | `compute_id, symbol, interval, ts` | `compute_id` | `computation/{algo}/{compute_id}/result_{sym}_{iv}.parquet` |
-| signals | `analysis_id, symbol, ts` | `analysis_id` | `signals/{analysis_id}/part-{ts}.parquet` |
+| result | `compute_id, symbol, interval, ts` | `compute_id` | `computation/{algo}/{compute_id}/{symbol}/{interval}/result.parquet` |
+| line_events | `compute_id, event_id` | `compute_id` | `computation/{algo}/{compute_id}/{symbol}/{interval}/line_events.parquet` |
+| candidates | `feature_id, ts, fib_group_id, ratio` | `feature_id` | `features/{feature_id}/{symbol}/{interval}/candidates.parquet` |
+| signals | `analysis_id, symbol, ts` | `analysis_id` | `signals/{analysis_id}/{symbol}/{interval}/signals.parquet` |
 | decisions | `decision_id, symbol, ts` | `decision_id` | `decisions/{decision_id}/part-{ts}.parquet` |
 | orders | `execution_id, order_id, ts` | `execution_id` | `orders/{execution_id}/part-{ts}.parquet` |
 | fills | `execution_id, order_id, ts` | `execution_id` | `fills/{execution_id}/part-{ts}.parquet` |
@@ -186,19 +194,20 @@ structure = duckdb.sql(f"SELECT * FROM read_parquet('{path}')").fetchone()
 
 | 表 | 自身ID | 追溯字段 | 含义 |
 |----|--------|---------|------|
-| result（投产表） | `compute_id` | — | 顶层，路径含算法名 |
-| signals | `analysis_id` | `algo + compute_id` | 用了哪个算法的哪组结果 |
+| result / line_events | `compute_id` | — | 顶层，路径含算法名 |
+| candidates | `feature_id` | `compute_id` | 用了哪组计算事实 |
+| signals | `analysis_id` | `feature_id` | 消费了哪张宽表 |
 | decisions | `decision_id` | `analysis_id` | 消费了哪组 signals |
 | orders | `execution_id` | `decision_id` | 执行了哪组 decisions |
 
-任何一笔成交可一路追溯：`execution_id → decision_id → analysis_id → compute_id`
+任何一笔成交可一路追溯：`execution_id → decision_id → analysis_id → feature_id → compute_id`
 
 ### 3.5 公共数据 vs 实验数据
 
 | 类别 | 特征 | 表 | 是否需要实验ID |
 |------|------|---|--------------|
 | **公共数据** | 固定参数、确定性、所有实验共享 | klines, indicators | ❌ |
-| **实验数据** | 参数可调、不同配置产出不同结果 | structures, signals, decisions, orders, fills, positions | ✅ |
+| **实验数据** | 参数可调、不同配置产出不同结果 | computation, features, signals, decisions, orders, fills, positions | ✅ |
 
 indicators（SMA(5), RSI(14), ATR(14) 等）是 klines 的确定性扩展——相同输入必定相同输出，没有"实验"概念。只有当算法参数不同时（如 structure 的 pivot_windows）才需要实验 ID 区分。
 
@@ -280,50 +289,67 @@ python main.py execute Compute --algo fib_retracement --compute_id base_v1 \
 - Grafana 可视化中间过程（pivots 分布、clusters 位置等）
 - 调试算法时逐步检查
 
-### 4.4 分析（Analysis）
+### 4.4 特征（Feature）
 
 ```
-职责：接收 bar → 读取投产表 → detect 信号
-触发：新 bar 到达（实时）/ 回测批量
-产出：warehouse/timing/signals/{analysis_id}/
-实验：analysis_id 标识检测参数 + 依赖的 algo + compute_id
+职责：读 klines + result + line_events → 算指标/标签 → 摊成宽表
+触发：手动 Assemble / 回测批量
+产出：warehouse/timing/features/{feature_id}/{symbol}/{interval}/
+实验：feature_id 标识拼宽参数（proximity_k / neighbor_k 等）+ 依赖的 compute_id
 ```
+
+第一张宽表是 `candidates.parquet`（`price_touch` job）。同一目录以后可再挂 `tags.parquet`。不在本层做交易规则。
 
 **核心纯函数**：
 
 ```python
-def detect(bar: dict, structure: list[FibGroup], state: DetectState, cfg: DetectConfig) -> DetectResult:
-    """纯函数：bar + 预计算结构 → 信号列表"""
+def run_detection(klines_df, result_df, events_df, cfg, compute_id, feature_id) -> dict:
+    """纯函数：当天触线 + 历史聚合 + 邻居 → candidates 行列表"""
 ```
 
-**分析配置（通过表索引指向计算结果）**：
+**特征配置**：
+
+```toml
+[feature.price_touch_0]
+feature_id = "pt001"
+job = "price_touch"
+algo = "fib_retracement"
+compute_id = "fib001"
+symbol = "885003.WI"
+interval = "1d"
+config = { proximity_k = 0.001, neighbor_k = 0.001, scan_bars = 0, emit_if_no_prefit = true }
+```
+
+字段契约见 [experiments/candidates.md](./experiments/candidates.md)。
+
+### 4.5 分析（Analysis）
+
+```
+职责：读特征宽表 → 规则匹配 → 写 signals
+触发：新 bar 到达（实时）/ 回测批量
+产出：warehouse/timing/signals/{analysis_id}/
+实验：analysis_id 标识规则参数 + 依赖的 feature_id
+```
+
+当前无已注册规则；`Analyze` 只认 `features/{feature_id}/candidates.parquet`，规则落地后再出信号。
+
+**分析配置（通过表索引指向特征宽表）**：
 
 ```toml
 [analysis.retracement_0]
 analysis_id = "ret_v1_tight"
-algo = "fib_retracement"         # 算法名 → 目录名
-compute_id = "base_v1"           # 实验ID → 子目录名
-symbol = "159363.OF"
+feature_id = "pt001"
+symbol = "885003.WI"
 interval = "1d"
-# 实际读取路径: warehouse/timing/computation/fib_retracement/base_v1/result_159363.OF_1d.parquet
-config = { touch_tolerance = 0.3, cooldown_bars = 3 }
-
-[analysis.retracement_1]
-analysis_id = "ret_v1_loose"
-algo = "fib_retracement"
-compute_id = "base_v1"
-symbol = "159363.OF"
-interval = "1d"
-config = { touch_tolerance = 0.8, cooldown_bars = 5 }
 ```
 
-**输出格式 — signals**：
+**输出格式 — signals**（规则落地后）：
 
-| analysis_id | algo | compute_id | symbol | ts | direction | strength | price | level | metadata |
-|-------------|------|------------|--------|-----|-----------|----------|-------|-------|----------|
-| ret_v1_tight | fib_retracement | base_v1 | 159363.OF | 1711152000 | long | 0.85 | 1.05 | 1.03 | {...} |
+| analysis_id | feature_id | compute_id | symbol | ts | direction | price | level | metadata |
+|-------------|------------|------------|--------|-----|-----------|-------|-------|----------|
+| ret_v1_tight | pt001 | fib001 | 885003.WI | 1711152000 | long | 1.05 | 1.03 | {...} |
 
-### 4.5 决策（Decision）
+### 4.6 决策（Decision）
 
 ```
 职责：接收 signal → 结合策略参数 → 产出决策
@@ -361,7 +387,7 @@ position_size = 0.1
 |-------------|-------------|--------|-----|--------|------|----------|--------|
 | fib_aggressive | ret_v1_tight | 159363.OF | 1711152000 | submit | buy | 0.2 | strength=0.85>0.5 |
 
-### 4.6 执行（Execution）
+### 4.7 执行（Execution）
 
 ```
 职责：接收 decision → 下单 → 成交 → 更新持仓
@@ -388,23 +414,22 @@ slippage = 0.0005
 每个下游服务记录它依赖的上游实验 ID，形成 DAG：
 
 ```
-compute_id: "base_v1"
+compute_id: "fib001"
     │
-    ├──→ analysis_id: "ret_v1_tight"
-    │        │
-    │        ├──→ decision_id: "fib_aggressive"
-    │        │        │
-    │        │        └──→ execution_id: "sim_run_001"
-    │        │
-    │        └──→ decision_id: "fib_conservative"
-    │                 │
-    │                 └──→ execution_id: "sim_run_002"
-    │
-    └──→ analysis_id: "ret_v1_loose"
-             └──→ ...
+    └──→ feature_id: "pt001"
+             │
+             ├──→ analysis_id: "ret_v1_tight"
+             │        │
+             │        ├──→ decision_id: "fib_aggressive"
+             │        │        └──→ execution_id: "sim_run_001"
+             │        └──→ decision_id: "fib_conservative"
+             │                 └──→ execution_id: "sim_run_002"
+             │
+             └──→ analysis_id: "ret_v1_loose"
+                      └──→ ...
 ```
 
-**一次完整实验 = 一条 ID 链路**：`compute_id → analysis_id → decision_id → execution_id`
+**一次完整实验 = 一条 ID 链路**：`compute_id → feature_id → analysis_id → decision_id → execution_id`
 
 切换"生产配置" = 修改当前激活的 ID 链路。
 
@@ -657,20 +682,26 @@ timing/
 │           ├── algo.py         # 纯函数: tag_pivots, zigzag, regression, ...
 │           ├── config.py       # FibRetracementConfig
 │           ├── models.py       # TrendLeg, FibGroup
-│           └── pipeline.py     # 管道编排: step1→step2→step3→step4→result
+│           └── pipeline.py     # 管道编排: step1→step2→step3→result + line_events
 │
-├── analysis/                    # ══ 分析服务 ══（回答：刚才发生了什么？）
+├── feature/                     # ══ 特征服务 ══（回答：当时能看见哪些数？）
 │   ├── __init__.py
-│   ├── app.py                  # AnalysisService(AppService) — 编排层
+│   ├── app.py                  # FeatureService(AppService)
+│   │                           #   alias = "FeatureService"
+│   │                           #   commands = ["timing.feature.command"]
+│   ├── command.py              # Assemble(job, feature_id, compute_id, symbol, interval)
+│   ├── protocol.py             # 读 result/line_events，写 features/
+│   └── jobs/
+│       ├── __init__.py         # JOB_REGISTRY
+│       └── price_touch/        # 当天触线宽表
+│
+├── analysis/                    # ══ 分析服务 ══（回答：这些数过不过关？）
+│   ├── __init__.py
+│   ├── app.py                  # AnalysisService(AppService)
 │   │                           #   alias = "AnalysisService"
 │   │                           #   commands = ["timing.analysis.command"]
-│   │                           #   on_bar → 读 structure → 规则匹配 → 写 signals
-│   ├── command.py              # RerunDetect 等手动命令
-│   └── rules/                  # 检测规则（纯函数，判断事实）
-│       ├── __init__.py
-│       ├── touch.py            # 触碰检测：price 靠近 level → signal
-│       ├── breakout.py         # 突破检测：price 穿越 structure → signal
-│       └── ...                 # 未来可扩展：均线交叉、RSI阈值等
+│   ├── command.py              # Analyze(rule, feature_id, analysis_id, ...)
+│   └── rules/                  # 对宽表做规则，产出 signals（当前空）
 │
 ├── decision/                    # ══ 决策服务 ══（回答：我应该做什么？）
 │   ├── __init__.py
@@ -710,9 +741,9 @@ timing/
 │
 ├── warehouse/                   # ══ 数据资产目录（.gitignore）══
 │   ├── klines/
-│   ├── indicators/
-│   ├── structures/{compute_id}/
-│   ├── signals/{analysis_id}/
+│   ├── computation/{algo}/{compute_id}/{symbol}/{interval}/
+│   ├── features/{feature_id}/{symbol}/{interval}/
+│   ├── signals/{analysis_id}/{symbol}/{interval}/
 │   ├── decisions/{decision_id}/
 │   └── execution/{execution_id}/
 │       ├── orders.parquet
@@ -729,8 +760,9 @@ timing/
 |------|----------------|---------|
 | IntegrationService | `ImportKlines`, `PushBars` | CLI execute / API |
 | StorageService | `Compact`, `Archive`, `Cleanup` | CLI execute / 定时 |
-| ComputationService | `ComputeIndicators`, `ComputeStructure` | CLI execute / 事件 |
-| AnalysisService | `RerunDetect` | CLI execute（手动重跑） |
+| ComputationService | `Compute` | CLI execute / 事件 |
+| FeatureService | `Assemble` | CLI execute |
+| AnalysisService | `Analyze` | CLI execute（规则落地后） |
 | DecisionService | (暂无) | — |
 | ExchangeService | — | （提供撮合接口，无 CLI 命令） |
 | ExecutionService | `Execute` | CLI execute |
@@ -742,7 +774,8 @@ timing/
 | IntegrationService | 监听推送、接收 API | 导入历史数据 |
 | StorageService | 定时巡检文件 | 手动触发合并 |
 | ComputationService | 监听数据变更自动算 | 手动触发计算 |
-| AnalysisService | 监听 bar 事件 → detect | — |
+| FeatureService | — | 手动 Assemble 宽表 |
+| AnalysisService | 监听宽表/bar → 规则 | 手动 Analyze |
 | DecisionService | 监听 signal 事件 → decide | — |
 | ExchangeService | 常驻提供撮合接口 | — |
 | ExecutionService | 监听 decision 事件 → execute | 手动触发回测 |
@@ -770,14 +803,22 @@ sma_20 = { fn = "ta_sma", args = ["close", 20] }
 rsi_14 = { fn = "ta_rsi", args = ["close", 14] }
 
 [services.computation.structure]
-fn = "timing.analysis.algo.retracement.algo.compute_retracement"
+fn = "timing.computation.algo.fib_retracement.pipeline.run_pipeline"
 config = { pivot_windows = [[5,5],[8,8]], zigzag_thresholds = [0.05, 0.10] }
+
+[services.feature]
+module = "timing.feature.app.FeatureService"
+feature_id = "pt001"
+compute_id = "fib001"
+job = "price_touch"
+symbol = "885003.WI"
+interval = "1d"
 
 [services.analysis]
 module = "timing.analysis.app.AnalysisService"
 analysis_id = "ret_v1"
-compute_id = "base_v1"
-symbol = "159363.OF"
+feature_id = "pt001"
+symbol = "885003.WI"
 interval = "1d"
 config = { touch_tolerance = 0.5, cooldown_bars = 5 }
 

@@ -1,10 +1,10 @@
 # candidates.parquet 字段含义
 
-> 投产表路径：`warehouse/timing/signals/{analysis_id}/{symbol}/{interval}/candidates.parquet`
+> 投产表路径：`warehouse/timing/features/{feature_id}/{symbol}/{interval}/candidates.parquet`
 >
-> 由 `price_touch` 读 **当天 K 线** + **当时仍存活的 `result.parquet` 行** + **`line_events.parquet` 历史事实** 写出。
+> 属于 **特征层宽表**（指标摊开，不是信号）。由 Feature 模块的 `price_touch` job 读 **当天 K 线** + **当时仍存活的 `result.parquet` 行** + **`line_events.parquet` 历史事实** 写出。
 >
-> **一行 = 某根 K 线碰到一条当时还活着的 Fib 线**。没有强度分、没有综合 score。
+> **一行 = 某根 K 线碰到一条当时还活着的 Fib 线**。没有强度分、没有综合 score。规则过关后的信号在 `signals/`，不在本表。
 
 本表只回答四件事：
 
@@ -19,7 +19,7 @@
 
 ## 可调试验参数
 
-写在 `analysis/rules/price_touch/profiles/{profile}.toml`，也可用 `--override proximity_k=0.0015`。**不要**从 Computation 的 `event_*` 抄过来。
+写在 `feature/jobs/price_touch/profiles/{profile}.toml`，也可用 `--override proximity_k=0.0015`。**不要**从 Computation 的 `event_*` 抄过来。
 
 | 参数 | 默认 | 管什么 | 怎么调 |
 |------|------|--------|--------|
@@ -76,7 +76,7 @@ high/low 与 [level_price × (1 − proximity_k), level_price × (1 + proximity_
 | `effective_ts` | int64 | 这组开始生效 |
 | `invalidated_ts` | int64/null | 这组失效时间；当时仍活着，此值要么为空要么大于 `ts` |
 | `compute_id` | str | 上游 Fib 实验 |
-| `analysis_id` | str | 本次分析实验 |
+| `feature_id` | str | 本次特征实验 |
 
 拟合描述（`leg_*`、`fib_score`、对齐字段）在 result，本表不重复。
 
