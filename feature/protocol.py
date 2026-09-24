@@ -56,6 +56,14 @@ class FeatureProtocol(Protocol):
         with duckdb.connect() as conn:
             return conn.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
 
+    def read_group_ranking(self, algo: str, compute_id: str, symbol: str, interval: str) -> pd.DataFrame:
+        path = os.path.join(self._compute_dir(algo, compute_id, symbol, interval), "group_ranking.parquet")
+        if not os.path.isfile(path):
+            log.debug(f'[特征] group_ranking 不存在: {path}')
+            return pd.DataFrame()
+        with duckdb.connect() as conn:
+            return conn.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
+
     def write_candidates(self, rows: List[dict], feature_id: str,
                          symbol: str, interval: str) -> str:
         base_dir = self._feature_dir(feature_id, symbol, interval)

@@ -26,14 +26,14 @@
 
 **流程**: `read_result + read_line_events` → `price_touch` → `write_candidates(feature_id)`
 
-### Analysis Rules（空壳，待规则）
+### Analysis Rules（已实现 fib_signal）
 
 | 组件 | 路径 | 职责 |
 |------|------|------|
-| Registry | `analysis/rules/__init__.py` | `RULE_REGISTRY` 当前为空 |
-| Command | `analysis/command.py` | `Analyze` 读 `features/{feature_id}/`，无规则则中止 |
+| Rule Meta | `analysis/rules/fib_signal/` | 硬过滤 + 方向 + 分项分 |
+| Command | `analysis/command.py` | `Analyze(rule, feature_id, signal_id, …)` |
 
-**流程（目标）**: `read_candidates(feature_id)` → 规则 → `write_signals(analysis_id)`
+**流程**: `read_candidates + read_result` → `fib_signal` → `write_signals(signal_id)`。入场/止损/过期不在本层。
 
 ### Decision Rules（已实现，待统一）
 

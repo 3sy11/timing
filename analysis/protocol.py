@@ -314,24 +314,20 @@ class AnalysisProtocol(Protocol):
         with duckdb.connect() as conn:
             return conn.execute(f"SELECT * FROM read_parquet('{path}')").fetchdf()
 
-    def write_signals(self, signals: List[dict], analysis_id: str,
+    def write_signals(self, signals: List[dict], signal_id: str,
                       symbol: str, interval: str) -> str:
-        base_dir = os.path.join(self.warehouse_path, "signals", analysis_id, symbol, interval)
+        from analysis.rules.fib_signal.detect import SIGNAL_COLS
+        base_dir = os.path.join(self.warehouse_path, "signals", signal_id, symbol, interval)
         os.makedirs(base_dir, exist_ok=True)
         path = os.path.join(base_dir, "signals.parquet")
-        if not signals:
-            pd.DataFrame(columns=["ts", "symbol", "compute_id", "direction", "strength",
-                                   "price", "level", "multiplier"]
-                         ).to_parquet(path, index=False)
-        else:
-            df = pd.DataFrame(signals)
-            df.to_parquet(path, index=False)
+        df = pd.DataFrame(signals, columns=SIGNAL_COLS) if signals else pd.DataFrame(columns=SIGNAL_COLS)
+        df.to_parquet(path, index=False)
         log.info(f'[分析] 写入信号 → {path} ({len(signals)} 条)')
         return path
 
-    def write_manifest(self, manifest_data: dict, analysis_id: str,
+    def write_manifest(self, manifest_data: dict, signal_id: str,
                        symbol: str, interval: str) -> str:
-        base_dir = os.path.join(self.warehouse_path, "signals", analysis_id, symbol, interval)
+        base_dir = os.path.join(self.warehouse_path, "signals", signal_id, symbol, interval)
         os.makedirs(base_dir, exist_ok=True)
         path = os.path.join(base_dir, "manifest.json")
         with open(path, "w", encoding="utf-8") as f:

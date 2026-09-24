@@ -327,27 +327,30 @@ config = { proximity_k = 0.001, neighbor_k = 0.001, scan_bars = 0, emit_if_no_pr
 ```
 职责：读特征宽表 → 规则匹配 → 写 signals
 触发：新 bar 到达（实时）/ 回测批量
-产出：warehouse/timing/signals/{analysis_id}/
-实验：analysis_id 标识规则参数 + 依赖的 feature_id
+产出：warehouse/timing/signals/{signal_id}/
+实验：signal_id 标识过滤与评分参数 + 依赖的 feature_id
 ```
 
-当前无已注册规则；`Analyze` 只认 `features/{feature_id}/candidates.parquet`，规则落地后再出信号。
+规则 `fib_signal`：硬过滤 + 方向乘数 + 分项分。不写过期时间，不算入场/止损/盈亏比。
 
-**分析配置（通过表索引指向特征宽表）**：
+**分析配置**：
 
 ```toml
-[analysis.retracement_0]
-analysis_id = "ret_v1_tight"
+[analysis.fib_signal_0]
+signal_id = "sig001"
+rule = "fib_signal"
 feature_id = "pt001"
 symbol = "885003.WI"
 interval = "1d"
 ```
 
-**输出格式 — signals**（规则落地后）：
+字段契约见 [experiments/signals.md](./experiments/signals.md)。
 
-| analysis_id | feature_id | compute_id | symbol | ts | direction | price | level | metadata |
-|-------------|------------|------------|--------|-----|-----------|-------|-------|----------|
-| ret_v1_tight | pt001 | fib001 | 885003.WI | 1711152000 | long | 1.05 | 1.03 | {...} |
+**输出格式 — signals**：
+
+| signal_id | feature_id | compute_id | ts | signal_direction | signal_score | level_price |
+|-----------|------------|------------|-----|------------------|--------------|-------------|
+| sig001 | pt001 | fib001 | 1711152000 | long | 3.4 | 100.2 |
 
 ### 4.6 决策（Decision）
 

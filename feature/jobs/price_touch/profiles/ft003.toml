@@ -1,0 +1,17 @@
+# ft003: 宽关注区组
+proximity_k = 0.003
+neighbor_k = 0.003
+scan_bars = 0
+emit_if_no_prefit = true
+attention_zone_k = 0.006
+sample_cap = 5
+use_group_filter = true
+include_pre_effective = true
+w_hold = 3.0
+w_weak = 1.0
+w_fit = 1.0
+w_cluster = 1.0
+w_cluster_conf = 0.5
+w_nearby = 1.0
+nearby_fib_cap = 3
+nearby_cls_cap = 2

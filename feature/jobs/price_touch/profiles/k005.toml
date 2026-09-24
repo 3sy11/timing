@@ -1,0 +1,4 @@
+proximity_k = 0.005
+neighbor_k = 0.001
+scan_bars = 0
+emit_if_no_prefit = true

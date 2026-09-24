@@ -157,4 +157,5 @@ weak 不进挡住率分母
 
 - 实体维：[result_parquet_fields.md](./result_parquet_fields.md)
 - 事件事实：[line_events.md](./line_events.md)
+- 信号表：[signals.md](./signals.md)
 - 全管道：[fib_pipeline_reference.md](../fib_pipeline_reference.md)

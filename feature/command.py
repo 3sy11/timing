@@ -43,14 +43,16 @@ class Assemble(BaseCommand):
             log.error(f'[特征] 无 result: {upstream_algo}/{self.compute_id}')
             return None
         events_df = proto.read_line_events(upstream_algo, self.compute_id, self.symbol, self.interval)
+        ranking_df = proto.read_group_ranking(upstream_algo, self.compute_id, self.symbol, self.interval)
 
         log.info(
             f'[特征] 开始 job={self.job} feature_id={self.feature_id} '
-            f'klines={len(klines_df)} lines={len(result_df)}'
+            f'klines={len(klines_df)} lines={len(result_df)} ranked_groups={len(ranking_df)}'
         )
         result = build_fn(
             klines_df, result_df, events_df, cfg,
             compute_id=self.compute_id, feature_id=self.feature_id,
+            ranking_df=ranking_df,
         )
         proto.write_candidates(result["candidates"], self.feature_id, self.symbol, self.interval)
         proto.write_manifest({

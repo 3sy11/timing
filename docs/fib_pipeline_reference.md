@@ -410,7 +410,7 @@ final_score = score × coverage
 
 ## Feature: price_touch 宽表
 
-旧的 `fib_touch`（proximity 加权分、`signals.parquet`）已删除。`price_touch` 在 Feature 模块出宽表，不是信号。分析层只对宽表做规则（规则尚未落地）。
+旧的 `fib_touch` 已删除。`price_touch` 在 Feature 模块出宽表。分析规则 `fib_signal` 读 candidates + result，写出 `signals/{signal_id}/`。入场、止损、盈亏比、过期不在信号表。字段见 [experiments/signals.md](./experiments/signals.md)。
 
 ### 数据流
 

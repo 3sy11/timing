@@ -6,10 +6,25 @@ import logging
 log = logging.getLogger(__name__)
 
 DEFAULTS = {
+    # 基础与触碰判定参数
     "proximity_k": 0.001,
     "neighbor_k": 0.001,
     "scan_bars": 0,
     "emit_if_no_prefit": True,
+    # 连续评分与关注区参数
+    "attention_zone_k": 0.005,
+    "sample_cap": 5,
+    "use_group_filter": True,
+    "include_pre_effective": False,
+    # 线质量评分权重
+    "w_hold": 3.0,
+    "w_weak": 1.0,
+    "w_fit": 1.0,
+    "w_cluster": 1.0,
+    "w_cluster_conf": 0.5,
+    "w_nearby": 1.0,
+    "nearby_fib_cap": 3,
+    "nearby_cls_cap": 2,
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")
