@@ -21,8 +21,6 @@ DEFAULTS = {
     "w_nearby_frate": 0.8,
     "w_nearby_cls": 0.5,
     "nearby_cls_cap": 2,
-    "direction_conf_align": 1.0,
-    "direction_conf_cross": 0.6,
     "min_signal_score": 3.0,
     "debug_mode": False,
 }

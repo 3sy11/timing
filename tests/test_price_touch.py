@@ -169,6 +169,54 @@ def test_nearby_cluster_dedupes_centers():
     assert self_row["nearby_cluster_n"] == 1
 
 
+def test_atr_median_ignores_outlier():
+    rec = _line(effective_ts=10, price=200.0)
+    klines = [
+        {"ts": 10, "high": 110.0, "low": 100.0, "close": 100.0},
+        {"ts": 20, "high": 103.0, "low": 103.0, "close": 103.0},
+        {"ts": 30, "high": 183.0, "low": 183.0, "close": 183.0},
+        {"ts": 40, "high": 203.2, "low": 199.8, "close": 203.0},
+    ]
+    events = [_ev(rec, "prefit", "bounce")]
+    rows = _run(klines, [rec], events, atr_period=3)["candidates"]
+    assert len(rows) == 1 and rows[0]["ts"] == 40
+    assert rows[0]["atr"] == 10.0
+    assert rows[0]["distance_atr"] == 0.3
+
+
+def test_episode_max_dist_atr_tracks_running_max():
+    rec = _line(effective_ts=10, price=200.0)
+    day = 86400 * 1000
+    klines = [
+        {"ts": 10, "high": 110.0, "low": 100.0, "close": 100.0},
+        {"ts": 10 + day, "high": 202.2, "low": 199.8, "close": 202.0},
+        {"ts": 10 + 2 * day, "high": 223.0, "low": 199.8, "close": 223.0},
+    ]
+    events = [_ev(rec, "prefit", "bounce")]
+    rows = _run(klines, [rec], events, atr_period=1)["candidates"]
+    rows = sorted(rows, key=lambda r: r["ts"])
+    assert len(rows) == 2
+    assert rows[0]["episode_id"] == rows[1]["episode_id"]
+    assert rows[0]["touch_seq"] == 1
+    assert rows[1]["touch_seq"] == 2
+    assert rows[0]["episode_max_dist_atr"] == rows[0]["distance_atr"]
+    assert rows[1]["episode_max_dist_atr"] == max(rows[0]["distance_atr"], rows[1]["distance_atr"])
+
+
+def test_distance_atr_uses_previous_bars_only():
+    rec = _line(effective_ts=10, price=200.0)
+    klines = [
+        {"ts": 10, "high": 110.0, "low": 100.0, "close": 100.0},
+        {"ts": 20, "high": 202.2, "low": 199.8, "close": 202.0},
+    ]
+    events = [_ev(rec, "prefit", "bounce")]
+    rows = _run(klines, [rec], events, atr_period=1)["candidates"]
+    assert len(rows) == 1
+    assert rows[0]["ts"] == 20
+    assert rows[0]["atr"] == 10.0
+    assert rows[0]["distance_atr"] == 0.2
+
+
 def test_scan_bars_limits_history():
     rec = _line(effective_ts=1)
     klines = [

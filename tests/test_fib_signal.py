@@ -28,7 +28,7 @@ def _result(direction="up", ratio=0.5, extrapolated=False, aligned=False, conf=1
 def _cand(direction="up", approach="from_above", **kw):
     gid = _GID_DN if direction == "down" else _GID
     base = {
-        "ts": 10, "close": 100.0, "approach": approach, "ratio": 0.5,
+        "ts": 10, "close": 101.0, "approach": approach, "ratio": 0.5,
         "level_price": 100.0, "fib_group_id": gid, "multiplier": 1,
         "direction": direction, "compute_id": "c", "feature_id": "f",
         "pre_hold_n": 2, "pre_hold_rate": 1.0, "pre_weak_share": 0.0,
@@ -65,21 +65,17 @@ def test_null_pre_weak_share_does_not_block():
     assert rows[0]["pass_hard_filter"] is True
 
 
-def test_direction_matrix():
-    cases = [
-        ("up", "from_above", "long", 1.0),
-        ("up", "from_below", "short", 0.6),
-        ("down", "from_below", "short", 1.0),
-        ("down", "from_above", "long", 0.6),
-    ]
-    cands, results = [], []
-    for i, (d, a, _side, _m) in enumerate(cases):
-        cands.append(_cand(direction=d, approach=a, ts=10 + i, pre_hold_rate=1.0))
-        results.append(_result(direction=d))
-    rows = _run(cands, results, min_signal_score=0)
-    got = {(r["direction"], r["approach"]): (r["signal_direction"], r["direction_conf"]) for r in rows}
-    for d, a, side, mult in cases:
-        assert got[(d, a)] == (side, mult)
+def test_score_equals_subtotal_and_copies_distance_atr():
+    rows = _run([
+        _cand(pre_hold_rate=1.0, atr=10.0, distance_atr=0.43, episode_max_dist_atr=0.51),
+    ], [_result()], min_signal_score=0)
+    assert len(rows) == 1
+    assert "signal_direction" not in rows[0]
+    assert "approach" not in rows[0]
+    assert rows[0]["signal_score"] == rows[0]["score_subtotal"] == 3.0
+    assert rows[0]["distance_atr"] == 0.43
+    assert rows[0]["atr"] == 10.0
+    assert rows[0]["episode_max_dist_atr"] == 0.51
 
 
 def test_extrapolated_dropped_unless_debug():
@@ -101,9 +97,7 @@ def test_low_score_not_written():
     assert dbg[0]["signal_score"] < 3.0
 
 
-def test_align_score_emits_cross_may_not():
-    up_above = _run([_cand(approach="from_above", pre_hold_rate=1.0)], [_result()])
-    up_below = _run([_cand(approach="from_below", pre_hold_rate=1.0)], [_result()])
-    assert len(up_above) == 1
-    assert up_above[0]["signal_score"] == 3.0
-    assert up_below == []
+def test_full_pre_hold_emits_at_min_score():
+    rows = _run([_cand(pre_hold_rate=1.0)], [_result()])
+    assert len(rows) == 1
+    assert rows[0]["signal_score"] == 3.0

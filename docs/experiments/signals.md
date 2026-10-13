@@ -4,7 +4,7 @@
 >
 > 由分析规则 `fib_signal` 读 **`candidates.parquet`** + **`result.parquet`**（锚点、外推、拟合分）写出。
 >
-> **一行 = 一次过关的碰线信号**。回答「要不要信」和「做多还是做空、有多强」。
+> **一行 = 一次过关的碰线信号**。回答「要不要信这根线」。做多还是做空不在本表。
 
 入场价、止损、目标、盈亏比、信号过期根数不在本表。那些是接到信号之后怎么做，属于决策层。
 
@@ -31,7 +31,7 @@
 ### 评分
 
 ```text
-signal_score = score_subtotal × direction_conf
+signal_score = score_subtotal
 score_subtotal
   = w_pre_hold × pre_hold_rate
   − w_pre_weak × pre_weak_share
@@ -55,19 +55,16 @@ score_subtotal
 | `w_nearby_fib` / `nearby_fib_cap` | `1.0` / `3` | 价近 Fib 条数，满 3 条不再加 |
 | `w_nearby_frate` | `0.8` | 邻居拟合前挡住率均值 |
 | `w_nearby_cls` / `nearby_cls_cap` | `0.5` / `2` | 价近聚类中心个数 |
-| `direction_conf_align` | `1.0` | 顺势乘数：up+from_above，或 down+from_below |
-| `direction_conf_cross` | `0.6` | 逆势乘数：另外两种组合 |
 | `min_signal_score` | `3.0` | 总分下限，低于则正式模式不写 |
 | `debug_mode` | `false` | true 时未过过滤、低分也写入，并填 `filter_fail_reason` |
 
-方向本身：
+本层不写多空。`atr`、`distance_atr`、`episode_max_dist_atr` 从 candidates 原样带上。是否当蹭线、做多还是做空，由决策层用 `noise_atr` 处理。依据见 [research.md §3.2](../research.md)。
 
-| Fib `direction` | `approach` | `signal_direction` | 乘数 |
-|-----------------|------------|--------------------|------|
-| up | from_above | long | align |
-| up | from_below | short | cross |
-| down | from_below | short | align |
-| down | from_above | long | cross |
+### 决策参数（不在本层生效）
+
+| 参数 | 当前取值 | 管什么 |
+|------|----------|--------|
+| `noise_atr` | `0.3` | `episode_max_dist_atr` 小于该倍数视为蹭线：从这次连续触碰开始，收盘还没离开线价这么远。决策层应丢掉。看板用同一阈值区分「蹭线 / 脱离」。分析层不按它过滤 |
 
 ---
 
@@ -81,19 +78,20 @@ score_subtotal
 | `compute_id` / `feature_id` | 上游计算、特征实验 |
 | `symbol` / `interval` / `ts` | 标的、周期、触发 K 线（与 candidates.ts 相同） |
 | `fib_group_id` / `ratio` / `level_price` | 碰到的线 |
-| `multiplier` / `direction` / `approach` | 尺度、拟合方向、从哪边碰到 |
+| `multiplier` / `direction` | 尺度、Fib 拟合方向（`up` / `down`）。不是交易方向 |
+| `atr` | 触发当根之前 `atr_period` 根真实波幅的中位数 |
+| `distance_atr` | `\|close − level_price\| / atr`。atr 为空则为 null |
+| `episode_max_dist_atr` | 同一 episode 到当根为止的最大 `distance_atr` |
 
 ### 结论
 
 | 字段 | 含义 |
 |------|------|
-| `signal_direction` | `long` / `short` |
-| `direction_conf` | 实际乘数（align 或 cross 的取值） |
-| `signal_score` | `score_subtotal × direction_conf` |
+| `signal_score` | 等于 `score_subtotal`，不再乘方向系数 |
 | `pass_hard_filter` | 正式入库恒为 true |
 | `filter_fail_reason` | 正式模式为 null；debug 时写第一条失败原因 |
 
-### 分项（乘方向乘数之前）
+### 分项
 
 `score_pre_hold`、`score_pre_weak`（≤0）、`score_fit_hold`、`score_cluster`、`score_cluster_conf`、`score_nearby_fib`、`score_nearby_frate`、`score_nearby_cls`、`score_subtotal`。
 
@@ -107,6 +105,7 @@ score_subtotal
 
 | 没有 | 原因 |
 |------|------|
+| `signal_direction` / `approach` / `direction_conf` | 多空和从哪边碰到不在信号表。`approach` 仍在 candidates |
 | `entry_price` / `stop_*` / `target_*` / `meets_rrr` | 决策层按自己的入场与止损假设去算 |
 | `signal_expire_ts` | 等多久才用，是决策的事 |
 | candidates 原始率 | 用 `feature_id + ts + fib_group_id + ratio` 回联 |

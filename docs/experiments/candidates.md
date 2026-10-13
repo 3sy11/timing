@@ -27,6 +27,7 @@
 | `neighbor_k` | `0.001` | 邻居带宽：别的存活 Fib 价 / 聚类中心与本线价差 ≤ `price×k` 才算近 | 更大邻居更多 |
 | `scan_bars` | `0` | 从最新往回扫几根 K 线。`0` = 全历史 | 调试时可改小 |
 | `emit_if_no_prefit` | `true` | 这条线拟合前没有一次 bounce/break 时是否仍出候选 | `false` 则这类行不写，`pre_hold_rate` 不会是 null |
+| `atr_period` | `14` | 收盘离线用当根之前连续多少根真实波幅的中位数，不含当根。窗口固定，不从 episode 首碰起算 | 与 `line_events` 的 `event_atr_period` 默认相同，但本表单独调，不回写事件标签 |
 
 这些参数**不改变** result 里有哪些线，也**不改变** line_events 里已有的 ATR 标签。
 
@@ -67,7 +68,10 @@ high/low 与 [level_price × (1 − proximity_k), level_price × (1 + proximity_
 |------|------|------|
 | `ts` | int64 | 这根 K 线时间 |
 | `close` | float64 | 这根收盘价 |
-| `approach` | str | `from_above` / `from_below`：上一根 close 在线价上方还是下方（第一根则看本根 close） |
+| `approach` | str | `from_above` / `from_below`：上一根 close 在线价上方还是下方（第一根则看本根 close）。只描述触碰，不进入信号表 |
+| `atr` | float64/null | 当根之前 `atr_period` 根真实波幅的中位数。历史不足为 null |
+| `distance_atr` | float64/null | `\|close − level_price\| / atr`。atr 为空或为 0 则为 null |
+| `episode_max_dist_atr` | float64/null | 同一条线、同一 episode 内，到当根为止 `distance_atr` 的累计最大。首碰等于自身。一直小于 `noise_atr` 表示价格还没离开这根线 |
 | `ratio` | float64 | 碰到的 Fib 比例 |
 | `level_price` | float64 | 这条线的价格（`result.price`） |
 | `fib_group_id` | str | 组身份，算法与 line_events 相同：`hash(effective_ts, multiplier, direction, round(leg_low,4), round(leg_high,4))` 前 16 位 |

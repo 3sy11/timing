@@ -25,6 +25,8 @@ DEFAULTS = {
     "w_nearby": 1.0,
     "nearby_fib_cap": 3,
     "nearby_cls_cap": 2,
+    # 收盘离线用前 atr_period 根真实波幅的中位数，不含当根
+    "atr_period": 14,
 }
 
 PROFILES_DIR = os.path.join(os.path.dirname(__file__), "profiles")

@@ -27,7 +27,7 @@ CANDIDATE_COLS = [
     "nearby_cluster_n", "nearby_cluster_hold_n", "nearby_cluster_hold_rate",
     "nearby_cluster_weak_n", "nearby_cluster_weak_share",
     # ── D 组: 周期与连续接近度因子 (新增 4 列) ──
-    "period", "proximity", "bar_position", "distance_pct",
+    "period", "proximity", "bar_position", "distance_pct", "atr", "distance_atr",
     # ── E 组: 样本信心与线质量评分 (新增 10 列) ──
     "sample_conf", "fit_sample_conf",
     "score_hold", "score_weak", "score_fit",
@@ -38,6 +38,7 @@ CANDIDATE_COLS = [
     "is_extrapolated", "fib_score",
     # ── G 组: 触碰波段与极值去重标签 (方案 1 新增 4 列) ──
     "episode_id", "touch_seq", "is_first_touch", "is_peak_touch",
+    "episode_max_dist_atr",
 ]
 
 
@@ -156,6 +157,7 @@ def run_detection(
     highs = kdf["high"].to_numpy(dtype=np.float64)
     lows = kdf["low"].to_numpy(dtype=np.float64)
     closes = kdf["close"].to_numpy(dtype=np.float64)
+    atr_arr = _atr_prev(highs, lows, closes, int(getattr(cfg, "atr_period", 14)))
     n = len(kdf)
     start = max(0, n - int(cfg.scan_bars)) if int(cfg.scan_bars) > 0 else 0
     pk = float(cfg.proximity_k)
@@ -240,6 +242,9 @@ def run_detection(
             dist = abs(close - p0)
             proximity = round(max(0.0, 1.0 - dist / (p0 * ak)), 4) if (p0 * ak) > 0 else 0.0
             distance_pct = round(dist / p0, 6) if p0 > 0 else 0.0
+            atr_i = float(atr_arr[i])
+            atr_val = round(atr_i, 4) if atr_i == atr_i and atr_i > 0 else None
+            distance_atr = round(dist / atr_i, 4) if atr_val else None
             if close > p0 * 1.001:
                 bar_position = "above"
             elif close < p0 * 0.999:
@@ -318,6 +323,8 @@ def run_detection(
                 "proximity": proximity,
                 "bar_position": bar_position,
                 "distance_pct": distance_pct,
+                "atr": atr_val,
+                "distance_atr": distance_atr,
                 # ── E 组 ──
                 "sample_conf": sample_conf,
                 "fit_sample_conf": fit_sample_conf,
@@ -350,6 +357,25 @@ def run_detection(
     }
 
 
+def _atr_prev(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int) -> np.ndarray:
+    """前 period 根真实波幅的中位数，不含当根。历史不足则为 nan。"""
+    n = len(closes)
+    tr = np.empty(n, dtype=np.float64)
+    tr[0] = highs[0] - lows[0]
+    if n > 1:
+        prev = closes[:-1]
+        tr[1:] = np.maximum(
+            highs[1:] - lows[1:],
+            np.maximum(np.abs(highs[1:] - prev), np.abs(lows[1:] - prev)),
+        )
+    atr = np.full(n, np.nan)
+    if period <= 0:
+        return atr
+    for i in range(period, n):
+        atr[i] = float(np.median(tr[i - period:i]))
+    return atr
+
+
 def _tag_episodes(cands: list[dict], max_gap_days: int = 4) -> list[dict]:
     if not cands:
         return cands
@@ -367,5 +393,10 @@ def _tag_episodes(cands: list[dict], max_gap_days: int = 4) -> list[dict]:
     peak_idx = df.groupby(["fib_group_id", "ratio", "episode_id"])["_sort_key"].idxmax()
     df["is_peak_touch"] = False
     df.loc[peak_idx, "is_peak_touch"] = True
+    df["episode_max_dist_atr"] = (
+        df.groupby(["fib_group_id", "ratio", "episode_id"], sort=False)["distance_atr"]
+        .transform(lambda s: s.expanding().max())
+        .round(4)
+    )
     df = df.drop(columns=["_sort_key"])
     return df.to_dict("records")

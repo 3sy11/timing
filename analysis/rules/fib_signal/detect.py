@@ -1,4 +1,4 @@
-"""fib_signal：硬过滤 + 方向 + 分项分。不算出场、止损、过期。"""
+"""fib_signal：硬过滤 + 分项分。不写多空，不算出场、止损、过期。"""
 from __future__ import annotations
 
 import logging
@@ -15,10 +15,11 @@ log = logging.getLogger(__name__)
 
 SIGNAL_COLS = [
     "signal_id", "compute_id", "feature_id", "symbol", "interval", "ts",
-    "fib_group_id", "ratio", "level_price", "multiplier", "direction", "approach",
+    "fib_group_id", "ratio", "level_price", "multiplier", "direction",
+    "atr", "distance_atr", "episode_max_dist_atr",
     "period", "proximity", "candidate_score", "line_quality",
     "episode_id", "touch_seq", "is_first_touch", "is_peak_touch",
-    "signal_direction", "direction_conf", "signal_score",
+    "signal_score",
     "pass_hard_filter", "filter_fail_reason",
     "score_pre_hold", "score_pre_weak", "score_fit_hold",
     "score_cluster", "score_cluster_conf",
@@ -42,18 +43,6 @@ def _num(v) -> Optional[float]:
 
 def _r4(v: float) -> float:
     return round(float(v), 4)
-
-
-def _direction(fib_dir: str, approach: str, cfg: FibSignalConfig) -> tuple[str, float]:
-    align = float(cfg.direction_conf_align)
-    cross = float(cfg.direction_conf_cross)
-    if fib_dir == "up" and approach == "from_above":
-        return "long", align
-    if fib_dir == "up" and approach == "from_below":
-        return "short", cross
-    if fib_dir == "down" and approach == "from_below":
-        return "short", align
-    return "long", cross
 
 
 def _fail_reason(row: dict, ent: dict, cfg: FibSignalConfig) -> Optional[str]:
@@ -181,9 +170,8 @@ def run_detection(
         ent = by_key.get(key)
         reason = _fail_reason(rec, ent, cfg)
         passed = reason is None
-        side, mult = _direction(str(rec["direction"]), str(rec["approach"]), cfg)
         parts = _scores(rec, ent, spans.get(int(rec["ts"])), cfg)
-        score = _r4(parts["score_subtotal"] * mult)
+        score = parts["score_subtotal"]
         if not passed:
             fail_n += 1
         elif score < float(cfg.min_signal_score):
@@ -203,7 +191,9 @@ def run_detection(
             "level_price": float(rec["level_price"]),
             "multiplier": int(rec["multiplier"]),
             "direction": str(rec["direction"]),
-            "approach": str(rec["approach"]),
+            "atr": _num(rec.get("atr")),
+            "distance_atr": _num(rec.get("distance_atr")),
+            "episode_max_dist_atr": _num(rec.get("episode_max_dist_atr")),
             "period": rec.get("period", "predict"),
             "proximity": rec.get("proximity"),
             "candidate_score": rec.get("candidate_score"),
@@ -212,8 +202,6 @@ def run_detection(
             "touch_seq": int(rec["touch_seq"]) if "touch_seq" in rec and rec["touch_seq"] is not None else None,
             "is_first_touch": bool(rec.get("is_first_touch", True)),
             "is_peak_touch": bool(rec.get("is_peak_touch", True)),
-            "signal_direction": side,
-            "direction_conf": mult,
             "signal_score": score,
             "pass_hard_filter": passed,
             "filter_fail_reason": None if passed else reason,

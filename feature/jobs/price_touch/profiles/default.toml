@@ -14,3 +14,4 @@ w_cluster_conf = 0.5
 w_nearby = 1.0
 nearby_fib_cap = 3
 nearby_cls_cap = 2
+atr_period = 14
